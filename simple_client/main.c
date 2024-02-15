@@ -144,7 +144,7 @@ int main(void)
 	// Check if socket is valid
 	if (server_socket == INVALID_SOCKET)
 	{
-		fprintf("[!] socket() failed. (%d)\n", WSAGetLastError());
+		fprintf(stderr, "[!] socket() failed. (%d)\n", WSAGetLastError());
 		cleanup(server_address, server_socket, NULL);
 		return 1;
 	}
@@ -169,7 +169,7 @@ int main(void)
 	int bytes_sent = send(server_socket, key, KEY_SIZE, 0);
 	if (bytes_sent == 0)
 	{
-		fprintf("[!] send() failed. (%d)\n", WSAGetLastError());
+		fprintf(stderr, "[!] send() failed. (%d)\n", WSAGetLastError());
 		cleanup(server_address, server_socket, NULL);
 		return 1;
 	}

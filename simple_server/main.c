@@ -257,7 +257,7 @@ int main(void)
 	}
 
 	if (send_data(client_socket, DATA) < 0) {
-		cleanup(listening_socket, client_socket, NULL);
+		cleanup(listening_socket, client_socket);
 		return 1;
 	}
 
