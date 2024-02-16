@@ -37,14 +37,6 @@ void cleanup(SOCKET listening_socket, SOCKET client_socket)
 	WSACleanup();
 }
 
-// Add comment
-void printBytes(const unsigned char* data, size_t dataLen) {
-	for (size_t i = 0; i < dataLen; ++i) {
-		printf("%02x ", data[i]);
-	}
-	printf("\n");
-}
-
 // Configures local address, creates listening socket, and binds socket to local address
 int initialize_server(SOCKET* listening_socket)
 {
@@ -194,15 +186,22 @@ int prepare_message(
 	}
 
 	// Add the first 4 bytes (length-prefix)
-	(*prepared_message)[0] = (char)((*prepared_message_size >> 24) & 0xFF);
-	(*prepared_message)[1] = (char)((*prepared_message_size >> 16) & 0xFF);
-	(*prepared_message)[2] = (char)((*prepared_message_size >> 8) & 0xFF);
-	(*prepared_message)[3] = (char)(*prepared_message_size & 0xFF);
+	(*prepared_message)[0] = (char)((raw_message_size >> 24) & 0xFF);
+	(*prepared_message)[1] = (char)((raw_message_size >> 16) & 0xFF);
+	(*prepared_message)[2] = (char)((raw_message_size >> 8) & 0xFF);
+	(*prepared_message)[3] = (char)(raw_message_size & 0xFF);
 
 	// Add the rest of the message
 	memcpy(*prepared_message + 4, raw_message, raw_message_size);
 
 	return 0;
+}
+
+void printBytes(const unsigned char* data, size_t dataLen) {
+	for (size_t i = 0; i < dataLen; ++i) {
+		printf("%02x ", data[i]);
+	}
+	printf("\n");
 }
 
 int send_data(SOCKET client_socket, const char* data)
@@ -217,6 +216,8 @@ int send_data(SOCKET client_socket, const char* data)
 		return 1;
 	}
 
+	printBytes(prepared_message, prepared_message_size);
+
 	int bytes_sent = send(client_socket, prepared_message, prepared_message_size, 0);
 	if (bytes_sent <= 0) {
 		fprintf(stderr, "[!] send() failed. (%d)\n", WSAGetLastError());
@@ -225,7 +226,6 @@ int send_data(SOCKET client_socket, const char* data)
 
 	return 0;
 }
-
 
 int main(void)
 {
@@ -256,7 +256,7 @@ int main(void)
 		return 1;
 	}
 
-	if (send_data(client_socket, DATA) < 0) {
+	if (send_data(client_socket, DATA) != 0) {
 		cleanup(listening_socket, client_socket);
 		return 1;
 	}
