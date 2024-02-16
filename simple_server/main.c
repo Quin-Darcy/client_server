@@ -125,6 +125,7 @@ int get_client(SOCKET listening_socket, SOCKET* client_socket)
 	return 0;
 }
 
+// Authenticate client
 int receive_and_validate_key(SOCKET client_socket, const char* expected_key, size_t key_size)
 {
 	char message_buffer[1024];
