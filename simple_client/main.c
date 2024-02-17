@@ -214,6 +214,7 @@ int main(void)
 	}
 
 	// Here we are printing, but later on this is where the payload will be executed
+	printBytes(payload, payload_size);
 	int result = execute_payload(NULL, 0);
 
 	free(payload);
