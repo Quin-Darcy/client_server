@@ -20,7 +20,8 @@ const char* SERVER_PORT = "8080";
 const unsigned int KEY_SIZE = 15;
 
 
-void printBytes(const unsigned char* data, size_t dataLen) {
+void printBytes(const unsigned char* data, size_t dataLen) 
+{
 	for (size_t i = 0; i < dataLen; ++i) {
 		printf("%02x ", data[i]);
 	}
