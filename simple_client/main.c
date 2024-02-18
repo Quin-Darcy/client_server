@@ -111,10 +111,10 @@ int authenticate(SOCKET server_socket, const char* key)
 	return 0;
 }
 
-int receive_data(SOCKET server_socket, char** payload, size_t* final_payload_size)
+int receive_data(SOCKET server_socket, unsigned char** payload, size_t* final_payload_size)
 {
 	// Create buffer to hold first 4 bytes of data - the length prefix
-	char length_prefix_buffer[LENGTH_PREFIX_SIZE];
+	unsigned char length_prefix_buffer[LENGTH_PREFIX_SIZE];
 
 	// Receive the length data into the buffer
 	int length_bytes_received = recv(server_socket, length_prefix_buffer, LENGTH_PREFIX_SIZE, 0);
@@ -140,7 +140,7 @@ int receive_data(SOCKET server_socket, char** payload, size_t* final_payload_siz
 	size_t payload_bytes_received = 0;
 
 	// Allocate memory to store the payload now that we know its size
-	*payload = (char*)calloc(payload_size, 1);
+	*payload = (unsigned char*)calloc(payload_size, 1);
 
 	if (*payload == NULL)
 	{
@@ -204,7 +204,7 @@ int main(void)
 	}
 
 	// Receive payload from server
-	char* payload = NULL;
+	unsigned char* payload = NULL;
 	size_t payload_size = 0;
 	if (receive_data(server_socket, &payload, &payload_size) != 0)
 	{

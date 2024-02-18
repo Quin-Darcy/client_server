@@ -178,7 +178,7 @@ int receive_and_validate_key(SOCKET client_socket, const char* expected_key, siz
 	return validation_result;
 }
 
-int fetch_payload(char** payload, size_t* payload_size)
+int fetch_payload(unsigned char** payload, size_t* payload_size)
 {
 	printf("[+] Fetching payload from %s ...\n", payload_path);
 
@@ -198,7 +198,7 @@ int fetch_payload(char** payload, size_t* payload_size)
 	fseek(fp, 0, SEEK_SET); 
 
 	// Allocate memory for the file contents
-	*payload = (char *)malloc(file_size + 1);
+	*payload = (unsigned char *)malloc(file_size + 1);
 
 	if (*payload == NULL)
 	{
@@ -229,9 +229,9 @@ int fetch_payload(char** payload, size_t* payload_size)
 }
 
 int prepare_message(
-	const char* raw_message,
+	const unsigned char* raw_message,
 	size_t raw_message_size,
-	char** prepared_message,
+	unsigned char** prepared_message,
 	size_t* prepared_message_size
 )
 {
@@ -239,7 +239,7 @@ int prepare_message(
 
 	// Allocate memory to the buffer which will hold the prepared message
 	*prepared_message_size = PREFIX_SIZE + raw_message_size;
-	*prepared_message = (char*)malloc(*prepared_message_size);
+	*prepared_message = (unsigned char*)malloc(*prepared_message_size);
 
 	// Allocation failed - Return error
 	if (*prepared_message == NULL)
@@ -248,10 +248,10 @@ int prepare_message(
 	}
 
 	// Add the first 4 bytes (length-prefix)
-	(*prepared_message)[0] = (char)((raw_message_size >> 24) & 0xFF);
-	(*prepared_message)[1] = (char)((raw_message_size >> 16) & 0xFF);
-	(*prepared_message)[2] = (char)((raw_message_size >> 8) & 0xFF);
-	(*prepared_message)[3] = (char)(raw_message_size & 0xFF);
+	(*prepared_message)[0] = (unsigned char)((raw_message_size >> 24) & 0xFF);
+	(*prepared_message)[1] = (unsigned char)((raw_message_size >> 16) & 0xFF);
+	(*prepared_message)[2] = (unsigned char)((raw_message_size >> 8) & 0xFF);
+	(*prepared_message)[3] = (unsigned char)(raw_message_size & 0xFF);
 
 	// Add the rest of the message
 	memcpy(*prepared_message + 4, raw_message, raw_message_size);
@@ -259,11 +259,11 @@ int prepare_message(
 	return 0;
 }
 
-int send_data(SOCKET client_socket, const char* payload, const size_t payload_size)
+int send_data(SOCKET client_socket, const unsigned char* payload, const size_t payload_size)
 {
 	printf("[+] Sending data to client ....\n");
 
-	char* prepared_message;
+	unsigned char* prepared_message;
 	size_t prepared_message_size;
 	if (prepare_message(payload, payload_size, &prepared_message, &prepared_message_size) != 0)
 	{
@@ -311,7 +311,7 @@ int main(void)
 		return 1;
 	}
 
-	char* payload = NULL;
+	unsigned char* payload = NULL;
 	size_t payload_size = 0;
 	if (fetch_payload(&payload, &payload_size) != 0)
 	{

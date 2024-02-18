@@ -12,7 +12,8 @@ typedef struct
 } DOSHeader;
 
 
-int parse_headers(const char* payload, DWORD* image_base, DWORD* address_of_entry) 
+// Retrieve ImageBase and AddressOfEntryPoint
+int parse_headers(const unsigned char* payload, DWORD* image_base, DWORD* address_of_entry) 
 {
     printf("[+] Parsing PE headers ...\n");
 
@@ -24,97 +25,71 @@ int parse_headers(const char* payload, DWORD* image_base, DWORD* address_of_entr
         return 1;
     }
 
-    IMAGE_NT_HEADERS32* nt_headers_temp = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
-    if (nt_headers_temp->Signature != IMAGE_NT_SIGNATURE) 
+    IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+    if (nt_headers->Signature != IMAGE_NT_SIGNATURE) 
     {
         fprintf(stderr, "[!] Invalid NT header.\n");
         return 1;
     }
 
-    // Check the Magic field in the OptionalHeader to determine the architecture
-    if (nt_headers_temp->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) 
+    if (nt_headers->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) 
     {
-        printf("[i] Architecture: 32-bit.\n");
-
-        // This is a 32-bit executable
-        IMAGE_NT_HEADERS32* nt_headers = nt_headers_temp;
-        
-        if (nt_headers->Signature != 0x4550) {
-            fprintf(stderr, "[!] Invalid NT header.\n");
-            return 1;
-        }
-
-        *address_of_entry = nt_headers->OptionalHeader.AddressOfEntryPoint;
-        *image_base = nt_headers->OptionalHeader.ImageBase;
-
-        // Adjusted for DWORD
-        printf("[i] Image Base: 0x%p\n", (void*)*image_base);
-        printf("[i] Entry Point Address: 0x%08x\n", *address_of_entry);
-    } 
-    else if (nt_headers_temp->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) 
-    {
-        printf("[i] Architecture: 64-bit.\n");
-
-        // This is a 64-bit executable
-        IMAGE_NT_HEADERS64* nt_headers = (IMAGE_NT_HEADERS64*)nt_headers_temp;
-        
-        if (nt_headers->Signature != 0x4550) {
-            fprintf(stderr, "[!] Invalid NT header.\n");
-            return 1;
-        }
-
-        *address_of_entry = nt_headers->OptionalHeader.AddressOfEntryPoint;
-        // For 64-bit, cast ImageBase directly since it's already DWORD
-        *image_base = nt_headers->OptionalHeader.ImageBase;
-
-        // Adjusted for DWORD
-        printf("[i] Image Base: 0x%p\n", (void*)(DWORD)(*image_base));
-        printf("[i] Entry Point Address: 0x%08x\n", *address_of_entry);
-    } 
-    else 
+        fprintf(stderr, "[!] 64-bit architechture detected. Please use 32-bit instead.\n");
+        return 1;
+    }
+    else if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC)
     {
         fprintf(stderr, "[!] Unknown PE format.\n");
+        return 1;   
+    }
+
+    *address_of_entry = nt_headers->OptionalHeader.AddressOfEntryPoint;
+    *image_base = nt_headers->OptionalHeader.ImageBase;
+
+    printf("[i] Image Base: 0x%08x\n", *image_base);
+    printf("[i] Entry Point Address: 0x%08x\n", *address_of_entry);
+
+    return 0;
+}
+
+// First attempts to allocate memory block at the EXE's ImageBase. If the memory can not be 
+// allocated at this address, a second attempt is made where the OS choses the allocation address.
+int allocate_executable_memory(const size_t payload_size, const DWORD image_base, LPVOID* base_address)
+{
+    printf("[+] Allocating memory for the payload at 0x%08x ...\n", image_base);
+
+    // Attempt to allocate memory at the Images's preferred address, ImageBase
+    *base_address = VirtualAlloc((LPVOID)image_base, (DWORD)payload_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+    if (*base_address == NULL || *base_address != (LPVOID)image_base)
+    {
+        fprintf(stderr, "[*] VirtualAlloc() failed to allocate at specified address.\n", image_base);
+        
+        printf("[+] Allocating memory at OS chosen address ...\n");
+
+        *base_address = VirtualAlloc(NULL, (DWORD)payload_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+
+        if (*base_address == NULL)
+        {
+            fprintf(stderr, "[!] VirtualAlloc() failed.\n");
+            return -1;
+        }
+
+        // 1 indicates memory allocated successfully but relocations need to be made
         return 1;
     }
 
     return 0;
 }
 
-// Requests block of memory suitable for code execution from OS at preferred image base address
-int allocate_executable_memory(const size_t payload_size, const DWORD image_base, LPVOID* base_address)
+int fix_relocations(unsigned char* payload, const size_t payload_size, const DWORD image_base, const LPVOID base_address)
 {
-    printf("[+] Allocating memory for the payload at 0x%p ...\n", (void*)image_base);
+    // printf("[+] Fixing relocations ...\n");
 
-    *base_address = VirtualAlloc((LPVOID)image_base, (DWORD)payload_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-
-    if (*base_address == NULL)
-    {
-        DWORD dwErrorCode = GetLastError();
-        LPVOID lpMsgBuf;
-        FormatMessage(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-            FORMAT_MESSAGE_FROM_SYSTEM |
-            FORMAT_MESSAGE_IGNORE_INSERTS,
-            NULL,
-            dwErrorCode,
-            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-            (LPTSTR) &lpMsgBuf,
-            0, NULL );
-
-        fprintf(stderr, "[!] VirtualAlloc() failed. Error code: %lu\n", dwErrorCode);
-        if(lpMsgBuf) {
-            fprintf(stderr, "Error message: %s\n", (char*)lpMsgBuf);
-            LocalFree(lpMsgBuf);
-        }
-        return 1;
-    }
-
-    if (*base_address != (LPVOID)image_base)
-    {
-        fprintf(stderr, "[*] Unable to allocate memory at preferred base address.\n");
-    }
-
+    // IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
+    // IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
     return 0;
+
 }
 
 // Initiates execution of the in-memory binary by jumping to its entry point
@@ -123,7 +98,7 @@ int allocate_executable_memory(const size_t payload_size, const DWORD image_base
 
 // }
 
-int execute_payload(const char* payload, const size_t payload_size)
+int execute_payload(const unsigned char* payload, const size_t payload_size)
 {
     DWORD image_base;
     DWORD address_of_entry;
@@ -134,10 +109,16 @@ int execute_payload(const char* payload, const size_t payload_size)
     }
 
     LPVOID base_address = NULL;
-    if (allocate_executable_memory(payload_size, image_base, &base_address) != 0)
+    int result = allocate_executable_memory(payload_size, image_base, &base_address);
+    if (result == -1)
     {
         fprintf(stderr, "[!] allocate_executable_memory() failed.\n");
         return 1;
+    }
+    else if (result == 1) 
+    {
+        // Relocation patching needs to occur
+
     }
 
     // printf("[+] Copying raw binary bytes into allocated memory region ...\n");
