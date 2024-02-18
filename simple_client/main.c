@@ -92,7 +92,7 @@ int initialize_client(SOCKET* server_socket)
 	freeaddrinfo(server_address);
 	server_address = NULL;
 
-	printf("[+] Connected to remote host at %s:%s\n", SERVER_IP, SERVER_PORT);
+	printf("[i] Connected to remote host at %s:%s\n", SERVER_IP, SERVER_PORT);
 
 	return 0;
 }

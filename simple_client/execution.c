@@ -5,12 +5,6 @@
 #include <winnt.h>
 #include "execution.h"
 
-typedef struct 
-{
-    uint16_t e_magic;
-    uint32_t e_lfanew;
-} DOSHeader;
-
 
 // Retrieve ImageBase and AddressOfEntryPoint
 int parse_headers(const unsigned char* payload, DWORD* image_base, DWORD* address_of_entry) 
@@ -63,7 +57,7 @@ int allocate_executable_memory(const size_t payload_size, const DWORD image_base
 
     if (*base_address == NULL || *base_address != (LPVOID)image_base)
     {
-        fprintf(stderr, "[*] VirtualAlloc() failed to allocate at specified address.\n", image_base);
+        fprintf(stderr, "[*] VirtualAlloc() unable to allocate at specified address.\n", image_base);
         
         printf("[+] Allocating memory at OS chosen address ...\n");
 
@@ -82,14 +76,63 @@ int allocate_executable_memory(const size_t payload_size, const DWORD image_base
     return 0;
 }
 
-int fix_relocations(unsigned char* payload, const size_t payload_size, const DWORD image_base, const LPVOID base_address)
+void apply_relocations(const unsigned char* payload, const DWORD image_base, const LPVOID base_address)
 {
-    // printf("[+] Fixing relocations ...\n");
+    printf("[+] Applying relocations ...\n");
 
-    // IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
-    // IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
-    return 0;
+    IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
+    IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
 
+    // The relocation directory contains the address (RVA) and size of the relocation table
+    IMAGE_DATA_DIRECTORY relocation_directory = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    // Relocation table entries specify an offset within its 4KB page and the type of adjustment to be made.
+    IMAGE_BASE_RELOCATION* relocation_table = (IMAGE_BASE_RELOCATION*)(payload + relocation_directory.VirtualAddress);
+    // Calculate the base relocation delta - to be used for adjusting relocation entries
+    LONG delta = (LONG)((DWORD)base_address - image_base); // LONG since diff could be < 0
+
+    if (relocation_directory.Size == 0)
+    {
+        printf("[i] The PE file contains no relocation entries.\n");
+    }
+
+    // Loop through entries and apply adjustments
+    DWORD total_size = 0;
+    DWORD relocation_blocks = 0;
+    while (total_size < relocation_directory.Size)
+    {
+        // Total size of the relocation block, including the header
+        DWORD block_size = relocation_table->SizeOfBlock;
+        // Number of 16-bit relocation entries which follow the header
+        DWORD entry_count = (block_size - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+        // Pointer to the first relocation entry in the block, treated as an array of WORD values
+        WORD* relocation_entries = (WORD*)((unsigned char*)relocation_table + sizeof(IMAGE_BASE_RELOCATION));
+    
+        for (DWORD i = 0; i < entry_count; i ++) 
+        {
+            // Capture the current entry
+            WORD entry = relocation_entries[i];
+            // The first 4 bits specifies the 'type' of relocation to perform
+            DWORD entry_type = entry >> 12;
+            // The last 12 bits specify the offset
+            DWORD entry_offset = entry & 0x0FFF;
+
+            if (entry_type == IMAGE_REL_BASED_HIGHLOW)
+            {
+                // Address where the relocation needs to be applied
+                DWORD* patch_address = (DWORD*)((unsigned char*)base_address + relocation_table->VirtualAddress + entry_offset);
+                // Apply the relocation by adding the delta
+                *patch_address += delta;
+            }
+            // Possible support for other relocation types
+        }
+
+        // Advance to the next block
+        total_size += block_size;
+        relocation_table = (IMAGE_BASE_RELOCATION*)((unsigned char*)relocation_table + block_size);
+        relocation_blocks += 1;
+    }
+
+    printf("[i] %lu relocation blocks processed.\n", relocation_blocks);
 }
 
 // Initiates execution of the in-memory binary by jumping to its entry point
@@ -115,14 +158,15 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
         fprintf(stderr, "[!] allocate_executable_memory() failed.\n");
         return 1;
     }
-    else if (result == 1) 
+
+    printf("[+] Copying payload bytes into allocated memory region at 0x%p ...\n", base_address);
+    memcpy(base_address, payload, payload_size);
+
+    // If previous result was 1, we need to apply relocations to the loaded EXE
+    if (result == 1)
     {
-        // Relocation patching needs to occur
-
+        apply_relocations(payload, image_base, base_address);
     }
-
-    // printf("[+] Copying raw binary bytes into allocated memory region ...\n");
-    // memcpy(base_address, payload, payload_size);
 
     printf("[+] Freeing allocated memory ...\n");
     if (!VirtualFree(base_address, (DWORD)payload_size, MEM_DECOMMIT))
