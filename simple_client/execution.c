@@ -11,15 +11,14 @@ int parse_headers(const unsigned char* payload, DWORD* image_base, DWORD* addres
 {
     printf("[+] Parsing PE headers ...\n");
 
-    IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
-
+    const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
     if (dos_header->e_magic != 0x5A4D) 
     {
         fprintf(stderr, "[!] Invalid DOS header.\n");
         return 1;
     }
 
-    IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
     if (nt_headers->Signature != IMAGE_NT_SIGNATURE) 
     {
         fprintf(stderr, "[!] Invalid NT header.\n");
@@ -72,23 +71,23 @@ int allocate_executable_memory(const size_t payload_size, const DWORD image_base
         // 1 indicates memory allocated successfully but relocations need to be made
         return 1;
     }
-
+ 
     return 0;
 }
 
-void apply_relocations(const unsigned char* payload, const DWORD image_base, const LPVOID base_address)
+void apply_relocations(const DWORD image_base, const LPVOID base_address)
 {
     printf("[+] Applying relocations ...\n");
 
-    IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
-    IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+    const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)((unsigned char*)base_address);
+    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)((unsigned char*)base_address + dos_header->e_lfanew);
 
     // The relocation directory contains the address (RVA) and size of the relocation table
-    IMAGE_DATA_DIRECTORY relocation_directory = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    const IMAGE_DATA_DIRECTORY relocation_directory = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
     // Relocation table entries specify an offset within its 4KB page and the type of adjustment to be made.
-    IMAGE_BASE_RELOCATION* relocation_table = (IMAGE_BASE_RELOCATION*)(payload + relocation_directory.VirtualAddress);
+    const IMAGE_BASE_RELOCATION* relocation_table = (IMAGE_BASE_RELOCATION*)((unsigned char*)base_address + relocation_directory.VirtualAddress);
     // Calculate the base relocation delta - to be used for adjusting relocation entries
-    LONG delta = (LONG)((DWORD)base_address - image_base); // LONG since diff could be < 0
+    const LONG delta = (LONG)((DWORD)base_address - image_base); // LONG since diff could be < 0
 
     if (relocation_directory.Size == 0)
     {
@@ -135,11 +134,77 @@ void apply_relocations(const unsigned char* payload, const DWORD image_base, con
     printf("[i] %lu relocation blocks processed.\n", relocation_blocks);
 }
 
-// Initiates execution of the in-memory binary by jumping to its entry point
-// void execute_entry_point(LPVOID image_base)
-// {
+int resolve_imports(const unsigned char* base_address)
+{
+    printf("[+] Resolving imports ...\n");
 
-// }
+    // Locate the import directory which points to an array of IMAGE_IMPORT_DESCRIPTOR structs
+    const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)(base_address);
+    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(base_address + dos_header->e_lfanew);
+    const IMAGE_OPTIONAL_HEADER* optional_header = &nt_headers->OptionalHeader;
+    const IMAGE_DATA_DIRECTORY* import_directory = &optional_header->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+    // Check if there are even any imports to resolve
+    if (import_directory->Size == 0) 
+    {
+        printf("[i] No imports to resolve.\n");
+        return 0;
+    }
+
+    // Each IMAGE_IMPORT_DESCRIPTOR corresponds to a DLL from which functions are imported
+    const IMAGE_IMPORT_DESCRIPTOR* import_descriptor = (const IMAGE_IMPORT_DESCRIPTOR*)(base_address + import_directory->VirtualAddress);
+    
+    // Iterate throught each 
+    while (import_descriptor->Name != 0)
+    {
+        printf("here1");
+        // Load the library from which the functions are imported
+        const char* dll_name = (const char*)(base_address + import_descriptor->Name);
+        HMODULE dll_module = LoadLibraryA((LPCSTR)dll_name);
+        if (dll_module == NULL)
+        {
+            fprintf(stderr, "[!] Failed to load %s.\n", dll_name);
+            return 1;
+        }
+        printf("here3");
+
+        // Patch the IAT by replacing each placeholder with the actual address of the imported function
+        IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(base_address + import_descriptor->FirstThunk);
+        printf("here4");
+        while (thunk->u1.Function != 0) 
+        {
+            printf("here5");
+            if (IMAGE_SNAP_BY_ORDINAL32(thunk->u1.Ordinal)) 
+            {
+                FARPROC proc_address = GetProcAddress(dll_module, (LPCSTR)IMAGE_ORDINAL32(thunk->u1.Ordinal));
+                if (proc_address == NULL) 
+                {
+                    fprintf(stderr, "[!] GetProcAddress() failed for ordinal %lu.\n", (ULONG)IMAGE_ORDINAL32(thunk->u1.Ordinal));
+                    return 1;
+                }
+                thunk->u1.Function = (ULONG_PTR)proc_address;
+            } 
+            else 
+            {
+                IMAGE_IMPORT_BY_NAME* import_by_name = (IMAGE_IMPORT_BY_NAME*)(base_address + thunk->u1.AddressOfData);
+                FARPROC proc_address = GetProcAddress(dll_module, import_by_name->Name);
+                if (proc_address == NULL) 
+                {
+                    fprintf(stderr, "[!] GetProcAddress() failed for %s.\n", import_by_name->Name);
+                    return 1;
+                }
+                thunk->u1.Function = (ULONG_PTR)proc_address;
+            }
+            thunk += 1;
+        }
+        printf("here6");
+        import_descriptor += 1;
+    }
+
+    printf("here7");
+
+    return 0;
+}
 
 int execute_payload(const unsigned char* payload, const size_t payload_size)
 {
@@ -159,13 +224,19 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
         return 1;
     }
 
-    printf("[+] Copying payload bytes into allocated memory region at 0x%p ...\n", base_address);
+    printf("[+] Copying payload unsigned chars into allocated memory region at 0x%p ...\n", base_address);
     memcpy(base_address, payload, payload_size);
 
     // If previous result was 1, we need to apply relocations to the loaded EXE
     if (result == 1)
     {
-        apply_relocations(payload, image_base, base_address);
+        apply_relocations(image_base, base_address);
+    }
+
+    if (resolve_imports((unsigned char*)base_address) != 0)
+    {
+        fprintf(stderr, "[!] resolve_imports() failed.\n");
+        return 1;
     }
 
     printf("[+] Freeing allocated memory ...\n");
