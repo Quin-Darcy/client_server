@@ -13,7 +13,7 @@
 
 const unsigned int KEY_SIZE = 15;
 const char* KEY = "This is a test!";
-const char* payload_path = "C:\\Users\\Victim\\OneDrive\\Documentos\\Projects\\CC++\\C\\client_server\\dummy\\dummy.exe";
+const char* payload_path = "C:\\Users\\Victim\\OneDrive\\Documentos\\Projects\\CC++\\C\\client_server\\simple_client\\stager.exe";
 const size_t PREFIX_SIZE = 4;
 
 

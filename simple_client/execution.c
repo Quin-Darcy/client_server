@@ -89,6 +89,8 @@ void apply_relocations(const DWORD image_base, const LPVOID base_address)
     // Calculate the base relocation delta - to be used for adjusting relocation entries
     const LONG delta = (LONG)((DWORD)base_address - image_base); // LONG since diff could be < 0
 
+    printf("[i] Delta: %d\n", delta);
+
     if (relocation_directory.Size == 0)
     {
         printf("[i] The PE file contains no relocation entries.\n");
@@ -153,27 +155,59 @@ int resolve_imports(const unsigned char* base_address)
 
     // Each IMAGE_IMPORT_DESCRIPTOR corresponds to a DLL from which functions are imported
     const IMAGE_IMPORT_DESCRIPTOR* import_descriptor = (const IMAGE_IMPORT_DESCRIPTOR*)(base_address + import_directory->VirtualAddress);
+
     
+    // Print the base address of the PE file loaded into memory
+    printf("[i] Base Address of PE in Memory: %p\n", (void*)base_address);
+
+    // Print the address of the DOS header and NT headers
+    printf("[i] DOS Header Address: %p\n", (void*)dos_header);
+    printf("[i] NT Headers Address: %p\n", (void*)nt_headers);
+
+    // Print the RVA of the NT headers from the DOS header
+    printf("[i] RVA to NT Headers from DOS Header: %08x\n", dos_header->e_lfanew);
+
+    // Since the IMAGE_OPTIONAL_HEADER is part of the NT headers, its address is the same as NT headers plus the offset of OptionalHeader
+    printf("[i] Optional Header Address: %p\n", (void*)optional_header);
+
+    // Print the virtual address (RVA) and size of the import directory from the optional header
+    printf("[i] Import Directory Address: %p\n", (void*)import_directory);
+    printf("[i] Import Directory RVA: %08x\n", import_directory->VirtualAddress);
+    printf("[i] Import Directory Size: %08x\n", import_directory->Size);
+
+    // Calculate and print the actual memory address of the import directory using its RVA
+    printf("[i] Actual Memory Address of Import Directory: %p\n", (void*)(base_address + import_directory->VirtualAddress));
+
+    // Print the address where the IMAGE_IMPORT_DESCRIPTOR starts
+    printf("[i] IMAGE_IMPORT_DESCRIPTOR Start Address: %p\n", (void*)import_descriptor);
+
+    // Print the RVA of the name of the first import descriptor, and its actual memory address
+    printf("[i] Import Descriptor Name RVA: %08x\n", import_descriptor->Name);
+    printf("[i] Actual Memory Address of Import Descriptor Name: %p\n", (void*)(base_address + import_descriptor->Name));
+
+    printf("[i] Expected Address for KERNEL32.dll Name: %p\n", (void*)(base_address + 0x8530));
+
+
+
+    getchar();
+
     // Iterate throught each 
     while (import_descriptor->Name != 0)
     {
-        printf("here1");
         // Load the library from which the functions are imported
         const char* dll_name = (const char*)(base_address + import_descriptor->Name);
+        printf("[i] Import Descriptor Name: %s\n", dll_name);
         HMODULE dll_module = LoadLibraryA((LPCSTR)dll_name);
         if (dll_module == NULL)
         {
             fprintf(stderr, "[!] Failed to load %s.\n", dll_name);
             return 1;
         }
-        printf("here3");
 
         // Patch the IAT by replacing each placeholder with the actual address of the imported function
         IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(base_address + import_descriptor->FirstThunk);
-        printf("here4");
         while (thunk->u1.Function != 0) 
         {
-            printf("here5");
             if (IMAGE_SNAP_BY_ORDINAL32(thunk->u1.Ordinal)) 
             {
                 FARPROC proc_address = GetProcAddress(dll_module, (LPCSTR)IMAGE_ORDINAL32(thunk->u1.Ordinal));
@@ -197,11 +231,8 @@ int resolve_imports(const unsigned char* base_address)
             }
             thunk += 1;
         }
-        printf("here6");
         import_descriptor += 1;
     }
-
-    printf("here7");
 
     return 0;
 }
@@ -224,7 +255,7 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
         return 1;
     }
 
-    printf("[+] Copying payload unsigned chars into allocated memory region at 0x%p ...\n", base_address);
+    printf("[+] Copying payload bytes into allocated memory region at 0x%p ...\n", base_address);
     memcpy(base_address, payload, payload_size);
 
     // If previous result was 1, we need to apply relocations to the loaded EXE
@@ -248,3 +279,17 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
 
     return 0;
 }
+
+
+/*
+00037FE0  .....idata$6...........idata$5p..........idata$6ú..........idata  
+00038020  $5l..........idata$6Þ..........idata$5h..........idata$6Ì.......  
+00038060  ...idata$5d..........idata$6¸..........idata$5`..........idata$6  
+000380A0  ¨..........idata$5\..........idata$6...........idata$5X.........  
+000380E0  .idata$6...........idata$5T..........idata$6x..........idata$5P.  
+00038120  .........idata$6f..........idata$5L..........idata$6Z..........i  
+00038160  data$5H..........idata$6L..........idata$5D..........idata$64...  
+000381A0  .......idata$5@..........idata$6...........idata$4d..........ida  
+000381E0  ta$5@..........idata$5...........idata$6z..........idata$5......  
+00038220  .....idata$6p..........idata$4°..........idata$5...........file.  
+*/
