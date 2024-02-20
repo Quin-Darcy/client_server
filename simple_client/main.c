@@ -47,7 +47,7 @@ void cleanup(SOCKET server_socket)
 
 int initialize_client(SOCKET* server_socket)
 {
-	printf("[+] Configuring remote address ...\n");
+	printf("[+] Initializing client ...\n");
 
 	struct addrinfo hints;
 	memset(&hints, 0, sizeof(hints));
@@ -61,8 +61,6 @@ int initialize_client(SOCKET* server_socket)
 		freeaddrinfo(server_address);
 		return 1;
 	}
-
-	printf("[+] Creating socket ...\n");
 
 	*server_socket = socket(
 		server_address->ai_family,
@@ -78,8 +76,6 @@ int initialize_client(SOCKET* server_socket)
 		server_address = NULL;
 		return 1;
 	}
-
-	printf("[+] Connecting to remote host ...\n");
 
 	if (connect(*server_socket, server_address->ai_addr, server_address->ai_addrlen) != 0)
 	{
