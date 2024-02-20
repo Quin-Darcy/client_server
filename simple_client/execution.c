@@ -19,7 +19,7 @@ typedef struct _PE_CONTEXT {
 } PE_CONTEXT; 
 
 
-void cleanup(PE_CONTEXT* pe_ctx)
+void cleanup_context(PE_CONTEXT* pe_ctx)
 {
     printf("[+] Cleaning up ...\n");
 
@@ -47,10 +47,9 @@ void cleanup(PE_CONTEXT* pe_ctx)
     }
 }
 
-// Parse the PE file and load each section individually
-int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
+int validate_pe(const unsigned char* payload)
 {
-    printf("[+] Loading PE sections ...\n");
+    printf("[+] Validating PE file ...\n");
 
     // Check for valid DOS signature
     const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
@@ -61,7 +60,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     }
 
     // Check that its a valid PE 
-    IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
     if (nt_headers->Signature != IMAGE_NT_SIGNATURE)
     {
         fprintf(stderr, "[!] Invalid NT header.\n");
@@ -80,12 +79,23 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         return 1;   
     }
 
+    printf("[i] Valid 32-bit PE file.\n");
+    return 0;
+}
+
+// Parse the PE file and load each section individually
+int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
+{
+    printf("[+] Loading PE sections ...\n");
+
+    // Check for valid DOS signature
+    const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
+    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+
     // Store the key pieces of information from the PE file for later access 
     pe_ctx->image_base = nt_headers->OptionalHeader.ImageBase;
     pe_ctx->address_of_entry = nt_headers->OptionalHeader.AddressOfEntryPoint;
     pe_ctx->number_of_sections = nt_headers->FileHeader.NumberOfSections; 
-
-    printf("[i] Number of Sections: %lu\n", pe_ctx->number_of_sections);
     
     // Allocate memory to store the all the section headers
     size_t section_headers_size = sizeof(IMAGE_SECTION_HEADER) * pe_ctx->number_of_sections;
@@ -107,6 +117,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     if (pe_ctx->sections_info == NULL)
     {
         fprintf(stderr, "[!] Failed to allocate memory for sections info.\n");
+        cleanup_context(pe_ctx);
         return 1;
     }
 
@@ -130,7 +141,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             if (base_addr == NULL)
             {
                 fprintf(stderr, "[!] Failed to allocate memory for the following section: %s\n", current_section->Name);
-                cleanup(pe_ctx);
+                cleanup_context(pe_ctx);
                 return 1;
             }
         }
@@ -142,79 +153,13 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         // Copy the contents of the section into the allocated region provided they are non-zero
         if (current_section->SizeOfRawData > 0)
         {
-            memcpy(base_addr, (void*)(payload + current_section->PointerToRawData), (size_t)current_section->SizeOfRawData);
+            size_t bytes_to_copy = (size_t)min(current_section->SizeOfRawData, current_section->Misc.VirtualSize);
+            memcpy(base_addr, (void*)(payload + current_section->PointerToRawData), bytes_to_copy);
         }
     }
 
-    return 0;
-}
+    printf("[i] Sections Loaded: %lu\n", pe_ctx->number_of_sections);
 
-// Retrieve ImageBase and AddressOfEntryPoint
-int parse_headers(const unsigned char* payload, DWORD* image_base, DWORD* address_of_entry) 
-{
-    printf("[+] Parsing PE headers ...\n");
-
-    const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
-    if (dos_header->e_magic != 0x5A4D) 
-    {
-        fprintf(stderr, "[!] Invalid DOS header.\n");
-        return 1;
-    }
-
-    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
-    if (nt_headers->Signature != IMAGE_NT_SIGNATURE) 
-    {
-        fprintf(stderr, "[!] Invalid NT header.\n");
-        return 1;
-    }
-
-    if (nt_headers->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) 
-    {
-        fprintf(stderr, "[!] 64-bit architechture detected. Please use 32-bit instead.\n");
-        return 1;
-    }
-    else if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC)
-    {
-        fprintf(stderr, "[!] Unknown PE format.\n");
-        return 1;   
-    }
-
-    *address_of_entry = nt_headers->OptionalHeader.AddressOfEntryPoint;
-    *image_base = nt_headers->OptionalHeader.ImageBase;
-
-    printf("[i] Image Base: 0x%08x\n", *image_base);
-    printf("[i] Entry Point Address: 0x%08x\n", *address_of_entry);
-
-    return 0;
-}
-
-// First attempts to allocate memory block at the EXE's ImageBase. If the memory can not be 
-// allocated at this address, a second attempt is made where the OS choses the allocation address.
-int allocate_executable_memory(const size_t payload_size, const DWORD image_base, LPVOID* base_address)
-{
-    printf("[+] Allocating memory for the payload at 0x%08x ...\n", image_base);
-
-    // Attempt to allocate memory at the Images's preferred address, ImageBase
-    *base_address = VirtualAlloc((LPVOID)image_base, (DWORD)payload_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-
-    if (*base_address == NULL || *base_address != (LPVOID)image_base)
-    {
-        fprintf(stderr, "[*] VirtualAlloc() unable to allocate at specified address.\n", image_base);
-        
-        printf("[+] Allocating memory at OS chosen address ...\n");
-
-        *base_address = VirtualAlloc(NULL, (DWORD)payload_size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-
-        if (*base_address == NULL)
-        {
-            fprintf(stderr, "[!] VirtualAlloc() failed.\n");
-            return -1;
-        }
-
-        // 1 indicates memory allocated successfully but relocations need to be made
-        return 1;
-    }
- 
     return 0;
 }
 
@@ -347,50 +292,22 @@ int resolve_imports(const unsigned char* base_address)
 
 int execute_payload(const unsigned char* payload, const size_t payload_size)
 {
-    // DWORD image_base;
-    // DWORD address_of_entry;
-    // if (parse_headers(payload, &image_base, &address_of_entry) != 0)
-    // {
-    //     fprintf(stderr, "[!] parse_headers() failed.\n");
-    //     return 1;
-    // }
+    // Validate the received payload
+    if (validate_pe(payload) != 0)
+    {
+        fprintf(stderr, "[!] Invalid PE file received.\n");
+        return 1;
+    }
 
-    // LPVOID base_address = NULL;
-    // int result = allocate_executable_memory(payload_size, image_base, &base_address);
-    // if (result == -1)
-    // {
-    //     fprintf(stderr, "[!] allocate_executable_memory() failed.\n");
-    //     return 1;
-    // }
-
-    // printf("[+] Copying payload bytes into allocated memory region at 0x%p ...\n", base_address);
-    // memcpy(base_address, payload, payload_size);
-
-    // // If previous result was 1, we need to apply relocations to the loaded EXE
-    // if (result == 1)
-    // {
-    //     apply_relocations(image_base, base_address);
-    // }
-
-    // if (resolve_imports((unsigned char*)base_address) != 0)
-    // {
-    //     fprintf(stderr, "[!] resolve_imports() failed.\n");
-    //     return 1;
-    // }
-
-    // printf("[+] Freeing allocated memory ...\n");
-    // if (!VirtualFree(base_address, (DWORD)payload_size, MEM_DECOMMIT))
-    // {
-    //     fprintf(stderr, "[!] VirtualFree() failed.\n");
-    //     return 1;
-    // }
-
+    // Parse the headers and load the sections into memory
     PE_CONTEXT pe_ctx;
     if (load_sections(payload, &pe_ctx) != 0)
     {
         fprintf(stderr, "[!] Load sections failed.\n");
         return 1;
     }
+
+    cleanup_context(&pe_ctx);
 
     return 0;
 }
