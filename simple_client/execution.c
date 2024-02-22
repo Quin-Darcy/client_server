@@ -178,6 +178,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     return 0;
 }
 
+// Currently debugging
 int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
 {
     printf("[+] Applying relocations ...\n");
