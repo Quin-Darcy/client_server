@@ -7,8 +7,8 @@
 
 typedef struct _SECTION_INFO {
     LPVOID base_address; // The address at which the section was loaded in memory
-    LPVOID preferred_address; // The RVA at which this section was intended to be loaded
-    DWORD section_size;  // The size of the section in memory
+    LPVOID preferred_address; // The address relative to ImageBase at which this section was intended to be loaded
+    DWORD virtual_size;  // The size of the section in memory
     intptr_t delta; // Difference between the preferred load address and the actual load address
 } SECTION_INFO;
 
@@ -85,6 +85,37 @@ int validate_pe(const unsigned char* payload)
     return 0;
 }
 
+// Function to adjust memory protection based on section characteristics
+DWORD get_section_protection(DWORD characteristics) 
+{
+    // if (characteristics & IMAGE_SCN_MEM_EXECUTE) 
+    // {
+    //     if (characteristics & IMAGE_SCN_MEM_WRITE) 
+    //     {
+    //         return PAGE_EXECUTE_READWRITE;
+    //     } 
+    //     else if (characteristics & IMAGE_SCN_MEM_READ) 
+    //     {
+    //         return PAGE_EXECUTE_READ;
+    //     } 
+    //     else 
+    //     {
+    //         return PAGE_EXECUTE;
+    //     }
+    // } 
+    // else if (characteristics & IMAGE_SCN_MEM_WRITE) 
+    // {
+    //     return PAGE_READWRITE;
+    // } 
+    // else if (characteristics & IMAGE_SCN_MEM_READ) 
+    // {
+    //     return PAGE_READONLY;
+    // }
+    // return PAGE_NOACCESS;
+
+    return PAGE_EXECUTE_READWRITE;
+}
+
 // Parse the PE file and load each section individually
 int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
 {
@@ -93,6 +124,9 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     // Check for valid DOS signature
     const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
     const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+
+    // Retrieve section alignment
+    DWORD section_alignment = nt_headers->OptionalHeader.SectionAlignment;
 
     printf("[i] Payload Address: %p\n", (void*)payload);
 
@@ -135,14 +169,17 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         IMAGE_SECTION_HEADER* current_section = &pe_ctx->section_headers[i];
         SECTION_INFO* current_sections_info = &pe_ctx->sections_info[i];
 
+        // Align VirtualSize with the nearest higher multiple of section_alignment
+        size_t aligned_size = (current_section->Misc.VirtualSize + section_alignment - 1) & ~(section_alignment - 1);
+
         // Attempt to allocate memory for it at its preferred address
         LPVOID preferred_address = (LPVOID)(pe_ctx->image_base + current_section->VirtualAddress);
-        LPVOID base_addr = VirtualAlloc(preferred_address, (size_t)current_section->Misc.VirtualSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        LPVOID base_addr = VirtualAlloc((LPVOID)(pe_ctx->image_base + current_section->VirtualAddress), aligned_size, MEM_COMMIT | MEM_RESERVE, get_section_protection(current_section->Characteristics));
 
         // If the preferred address is unavilable, let the OS decide
         if (base_addr == NULL)
         {
-            base_addr = VirtualAlloc(NULL, (size_t)current_section->Misc.VirtualSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            base_addr = VirtualAlloc(NULL, aligned_size, MEM_COMMIT | MEM_RESERVE, get_section_protection(current_section->Characteristics));
 
             // If it fails again, return
             if (base_addr == NULL)
@@ -155,7 +192,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         // Update the corresponding sections_info member
         current_sections_info->base_address = base_addr;
         current_sections_info->preferred_address = preferred_address;
-        current_sections_info->section_size = current_section->Misc.VirtualSize;
+        current_sections_info->virtual_size = current_section->Misc.VirtualSize;
         current_sections_info->delta = (intptr_t)base_addr - (intptr_t)preferred_address;
 
         // Copy the contents of the section into the allocated region provided they are non-zero
@@ -163,13 +200,20 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         {
             size_t bytes_to_copy = (size_t)min(current_section->SizeOfRawData, current_section->Misc.VirtualSize);
             printf("[i] Disk Address for %s: %p\n", current_section->Name, (void*)(payload + current_section->PointerToRawData));
-            memcpy(base_addr, (void*)(payload + current_section->PointerToRawData), bytes_to_copy);
+
+            // Ensure that the destination buffer is large enough for the copy operation
+            if (aligned_size < bytes_to_copy) {
+                fprintf(stderr, "[!] Allocated memory size is smaller than the section's raw data size for section: %s\n", current_section->Name);
+                return 1; // or handle error appropriately
+            }
+
+            memcpy((void*)base_addr, (void*)(payload + current_section->PointerToRawData), bytes_to_copy);
         }
 
         printf("[i] Section %d: %s\n", i+1, current_section->Name);
         printf("    Preferred Address: 0x%p\n", preferred_address);
         printf("    Actual Base Address: 0x%p\n", base_addr);
-        printf("    Size: %lu bytes\n", (unsigned long)current_sections_info->section_size);
+        printf("    Size: %lu bytes\n", (unsigned long)current_sections_info->virtual_size);
         printf("    Delta: %ld\n", (long)current_sections_info->delta);
     }
 
@@ -198,17 +242,40 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         return 0;
     } 
 
-    printf("[i] Relocation Directory at RVA: 0x%X, Size: %lu bytes\n", relocation_directory.VirtualAddress, relocation_directory.Size);
+    // Determine which section contains the relocation_directory
+    int found = 0;
+    DWORD reloc_offset = 0;
+    for (DWORD i = 0; i < pe_ctx->number_of_sections; i++) 
+    {
+        // Find the sections whose virtual address range contains the virtual address of the relocation directory
+        IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[i];
+        if (relocation_directory.VirtualAddress >= section->VirtualAddress &&
+            relocation_directory.VirtualAddress < section->VirtualAddress + section->SizeOfRawData) 
+        {
+            // Once found, take the difference between the two RVAs which represents a virtual offset and add to it the disk offset
+            // This gives the actual address in the payload (on disk) where the relocation directory can be found
+            reloc_offset = section->PointerToRawData + (relocation_directory.VirtualAddress - section->VirtualAddress);
+            found = 1;
+            break;
+        }
+    }
+
+    if (found == 0) {
+        fprintf(stderr, "[!] Failed to find section containing the relocation directory.\n");
+        return 1;
+    }
 
     // To track total blocks stepped through
     DWORD num_blocks = 0;
     DWORD processed_size = 0;
     // Point relocation block to the first block of the relocation table
-    IMAGE_BASE_RELOCATION* current_block = (IMAGE_BASE_RELOCATION*)((DWORD)payload + relocation_directory.VirtualAddress);
+    IMAGE_BASE_RELOCATION* current_block = (IMAGE_BASE_RELOCATION*)(payload + reloc_offset);
 
     printf("[i] First Relocation Block at: %p\n", (void*)current_block);
-
     getchar();
+    printf("[i] Block Size: %d\n", current_block->SizeOfBlock);
+    printf("[i] Page RVA: %p\n", (void*)current_block->VirtualAddress);
+    printf("[i] Preferred Page Address: %p\n", (void*)(pe_ctx->image_base + current_block->VirtualAddress));
 
     // Iterate through relocation blocks
     while (processed_size < relocation_directory.Size)
@@ -226,9 +293,9 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         {
             printf("3\n");
             DWORD section_preferred_address = (DWORD)pe_ctx->sections_info[i].preferred_address;
-            DWORD section_size = (DWORD)pe_ctx->sections_info[i].section_size;
+            DWORD virtual_size = (DWORD)pe_ctx->sections_info[i].virtual_size;
 
-            if ((section_preferred_address <= preferred_page_address) && (preferred_page_address <= section_preferred_address + section_size))
+            if ((section_preferred_address <= preferred_page_address) && (preferred_page_address <= section_preferred_address + virtual_size))
             {
                 section_index = i;
                 break;
