@@ -8,6 +8,7 @@
 typedef struct _SECTION_INFO {
     LPVOID base_address; // The address at which the section was loaded in memory
     LPVOID preferred_address; // The address relative to ImageBase at which this section was intended to be loaded
+    DWORD virtual_address; // Offset from ImageBase
     DWORD virtual_size;  // The size of the section in memory
     intptr_t delta; // Difference between the preferred load address and the actual load address
 } SECTION_INFO;
@@ -128,10 +129,6 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     // Retrieve section alignment
     DWORD section_alignment = nt_headers->OptionalHeader.SectionAlignment;
 
-    printf("[i] Payload Address: %p\n", (void*)payload);
-
-    printf("[i] PE Image Base: 0x%lX\n", (unsigned long)nt_headers->OptionalHeader.ImageBase);
-
     // Store the key pieces of information from the PE file for later access 
     pe_ctx->image_base = nt_headers->OptionalHeader.ImageBase;
     pe_ctx->address_of_entry = nt_headers->OptionalHeader.AddressOfEntryPoint;
@@ -192,6 +189,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         // Update the corresponding sections_info member
         current_sections_info->base_address = base_addr;
         current_sections_info->preferred_address = preferred_address;
+        current_sections_info->virtual_address = current_section->VirtualAddress;
         current_sections_info->virtual_size = current_section->Misc.VirtualSize;
         current_sections_info->delta = (intptr_t)base_addr - (intptr_t)preferred_address;
 
@@ -199,22 +197,13 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         if (current_section->SizeOfRawData > 0)
         {
             size_t bytes_to_copy = (size_t)min(current_section->SizeOfRawData, current_section->Misc.VirtualSize);
-            printf("[i] Disk Address for %s: %p\n", current_section->Name, (void*)(payload + current_section->PointerToRawData));
-
             // Ensure that the destination buffer is large enough for the copy operation
             if (aligned_size < bytes_to_copy) {
                 fprintf(stderr, "[!] Allocated memory size is smaller than the section's raw data size for section: %s\n", current_section->Name);
                 return 1; // or handle error appropriately
             }
-
             memcpy((void*)base_addr, (void*)(payload + current_section->PointerToRawData), bytes_to_copy);
         }
-
-        printf("[i] Section %d: %s\n", i+1, current_section->Name);
-        printf("    Preferred Address: 0x%p\n", preferred_address);
-        printf("    Actual Base Address: 0x%p\n", base_addr);
-        printf("    Size: %lu bytes\n", (unsigned long)current_sections_info->virtual_size);
-        printf("    Delta: %ld\n", (long)current_sections_info->delta);
     }
 
     printf("[i] Sections Loaded: %lu\n", pe_ctx->number_of_sections);
@@ -229,9 +218,6 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
 
     const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)payload;
     const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
-
-    printf("[i] DOS Header at: %p\n", (void*)dos_header);
-    printf("[i] NT Headers at: %p\n", (void*)nt_headers);
 
     // The relocation directory contains the address (RVA) and size of the relocation table
     const IMAGE_DATA_DIRECTORY relocation_directory = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
@@ -265,44 +251,32 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         return 1;
     }
 
-    // To track total blocks stepped through
-    DWORD num_blocks = 0;
+    // To track total entries processed
     DWORD processed_size = 0;
+    DWORD entries_processed = 0;
     // Point relocation block to the first block of the relocation table
     IMAGE_BASE_RELOCATION* current_block = (IMAGE_BASE_RELOCATION*)(payload + reloc_offset);
-
-    printf("[i] First Relocation Block at: %p\n", (void*)current_block);
-    getchar();
-    printf("[i] Block Size: %d\n", current_block->SizeOfBlock);
-    printf("[i] Page RVA: %p\n", (void*)current_block->VirtualAddress);
-    printf("[i] Preferred Page Address: %p\n", (void*)(pe_ctx->image_base + current_block->VirtualAddress));
 
     // Iterate through relocation blocks
     while (processed_size < relocation_directory.Size)
     {
         // This size includes header and entries
         DWORD block_size = current_block->SizeOfBlock;
-        DWORD page_rva = current_block->VirtualAddress;
-        DWORD preferred_page_address = pe_ctx->image_base + page_rva;
-
-        printf("[i] Number of Sections: %d\n", pe_ctx->number_of_sections);
+        DWORD page_virtual_address = current_block->VirtualAddress;
 
         // Loop through the sections until the one containing the page_rva is found
         DWORD section_index = (DWORD)-1;
         for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
         {
-            printf("3\n");
-            DWORD section_preferred_address = (DWORD)pe_ctx->sections_info[i].preferred_address;
+            DWORD section_virtual_address = (DWORD)pe_ctx->sections_info[i].virtual_address;
             DWORD virtual_size = (DWORD)pe_ctx->sections_info[i].virtual_size;
 
-            if ((section_preferred_address <= preferred_page_address) && (preferred_page_address <= section_preferred_address + virtual_size))
+            if ((section_virtual_address <= page_virtual_address) && (page_virtual_address <= section_virtual_address + virtual_size))
             {
                 section_index = i;
                 break;
             }
         }
-
-        printf("4\n");
 
         if (section_index == (DWORD)-1)
         {
@@ -312,7 +286,7 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
 
         // Compute the actual address of the 4KB page which this relocation block corresponds to 
         DWORD_PTR actual_page_address = (DWORD_PTR)pe_ctx->sections_info[section_index].base_address 
-            + (page_rva - (DWORD)pe_ctx->sections_info[section_index].preferred_address);
+            + (page_virtual_address - (DWORD)pe_ctx->sections_info[section_index].virtual_address);
         // Create pointer pointing to entires right after the IMAGE_BASE_RELOCATION header
         WORD* relocation_entries = (WORD*)((DWORD_PTR)current_block + sizeof(IMAGE_BASE_RELOCATION));
         // Calculate teh number of relocation entries in this block
@@ -334,10 +308,17 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             {
                 // Shift the patch address by the delta corresponding to this section
                 *(DWORD*)patch_address += (DWORD)pe_ctx->sections_info[section_index].delta;
+                entries_processed += 1;
+            }
+            else if (type == IMAGE_REL_BASED_ABSOLUTE)
+            {
+                entries_processed += 1;
+                continue;
             }
             else 
             {
-                fprintf(stderr, "[!] Unsupported relocation type.\n");
+                fprintf(stderr, "[!] Unsupported relocation type. Relocation Info Address: %p\n", (void*)&relocation_info);
+                getchar();
                 return 1;
             }
         }
@@ -345,10 +326,9 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         // Advance forward to the next block
         current_block = (IMAGE_BASE_RELOCATION*)((unsigned char*)current_block + block_size);
         processed_size += block_size;
-        num_blocks += 1;
     }
 
-    printf("[i] %d total relocation blocks processed.\n", num_blocks);
+    printf("[i] %d total addresses patched.\n", entries_processed);
 
     return 0;
 }
