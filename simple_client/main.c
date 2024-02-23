@@ -35,7 +35,7 @@ int initializeWSA(void) {
 
 void cleanup(SOCKET server_socket) 
 {
-	printf("[+] Cleaning up ...\n");
+	printf("[+] Closing socket ...\n");
 	
 	if (server_socket != INVALID_SOCKET)
 	{

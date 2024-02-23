@@ -24,7 +24,7 @@ typedef struct _PE_CONTEXT {
 
 void cleanup_context(PE_CONTEXT* pe_ctx)
 {
-    printf("[+] Cleaning up ...\n");
+    printf("[+] Cleaning up PE context ...\n");
 
     // Free the memory which was allocated to the sections_headers and sections_info members
     if (pe_ctx->section_headers != NULL)
