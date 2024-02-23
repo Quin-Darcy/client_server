@@ -333,6 +333,107 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     return 0;
 }
 
+int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
+{
+    printf("[+] Resolving imports ...\n");
+
+    // Locate the import directory which points to an array of IMAGE_IMPORT_DESCRIPTOR structs
+    const IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)(payload);
+    const IMAGE_NT_HEADERS32* nt_headers = (IMAGE_NT_HEADERS32*)(payload + dos_header->e_lfanew);
+    const IMAGE_OPTIONAL_HEADER* optional_header = &nt_headers->OptionalHeader;
+    const IMAGE_DATA_DIRECTORY* import_directory = &optional_header->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+    // Check if there are even any imports to resolve
+    if (import_directory->Size == 0) 
+    {
+        printf("[i] No imports to resolve.\n");
+        return 0;
+    }
+
+    int found = 0;
+    DWORD import_offset = 0;
+    DWORD section_index;
+    for (DWORD i = 0; i < pe_ctx->number_of_sections; i++) 
+    {
+        // Find the sections whose virtual address range contains the virtual address of the import directory
+        IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[i];
+        if (import_directory->VirtualAddress >= section->VirtualAddress &&
+            import_directory->VirtualAddress < section->VirtualAddress + section->SizeOfRawData) 
+        {
+            // Once found, take the difference between the two RVAs which represents a virtual offset and add to it the disk offset
+            // This gives the actual address in the payload (on disk) where the import directory can be found
+            import_offset = section->PointerToRawData + (import_directory->VirtualAddress - section->VirtualAddress);
+            found = 1;
+            section_index = i;
+            break;
+        }
+    }
+
+    if (found == 0) {
+        fprintf(stderr, "[!] Failed to find section containing the import directory.\n");
+        return 1;
+    }
+
+    // Each IMAGE_IMPORT_DESCRIPTOR corresponds to a DLL from which functions are imported
+    const IMAGE_IMPORT_DESCRIPTOR* import_descriptor = (const IMAGE_IMPORT_DESCRIPTOR*)(payload + import_offset); 
+
+    // To track number of imports resolved
+    DWORD imports_resolved = 0;
+
+    // The section containing the import directory
+    IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[section_index];
+
+    // Patch IAT after getting actual address of IAT
+
+    // // Iterate throught each 
+    // while (import_descriptor->Name != 0)
+    // {
+    //     // Load the library from which the functions are imported
+    //     const char* dll_name = (const char*)(payload + section->PointerToRawData + (import_descriptor->Name - section->VirtualAddress));
+    //     printf("[i] Import Descriptor Name: %s\n", dll_name);
+    //     HMODULE dll_module = LoadLibraryA((LPCSTR)dll_name);
+    //     if (dll_module == NULL)
+    //     {
+    //         fprintf(stderr, "[!] Failed to load %s.\n", dll_name);
+    //         return 1;
+    //     }
+
+    //     // Patch the IAT by replacing each placeholder with the actual address of the imported function
+    //     IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(payload + import_descriptor->FirstThunk);
+    //     while (thunk->u1.Function != 0) 
+    //     {
+    //         if (IMAGE_SNAP_BY_ORDINAL32(thunk->u1.Ordinal)) 
+    //         {
+    //             FARPROC proc_address = GetProcAddress(dll_module, (LPCSTR)IMAGE_ORDINAL32(thunk->u1.Ordinal));
+    //             if (proc_address == NULL) 
+    //             {
+    //                 fprintf(stderr, "[!] GetProcAddress() failed for ordinal %lu.\n", (ULONG)IMAGE_ORDINAL32(thunk->u1.Ordinal));
+    //                 return 1;
+    //             }
+    //             thunk->u1.Function = (ULONG_PTR)proc_address;
+    //         } 
+    //         else 
+    //         {
+    //             IMAGE_IMPORT_BY_NAME* import_by_name = (IMAGE_IMPORT_BY_NAME*)(payload + thunk->u1.AddressOfData);
+    //             FARPROC proc_address = GetProcAddress(dll_module, import_by_name->Name);
+    //             if (proc_address == NULL) 
+    //             {
+    //                 fprintf(stderr, "[!] GetProcAddress() failed for %s.\n", import_by_name->Name);
+    //                 return 1;
+    //             }
+    //             thunk->u1.Function = (ULONG_PTR)proc_address;
+    //         }
+    //         thunk += 1;
+    //     }
+    //     import_descriptor++;
+    //     imports_resolved += 1;
+    // }
+
+    printf("[i] %d total imports resolved.\n", imports_resolved);
+
+    return 0;
+}
+
 int execute_payload(const unsigned char* payload, const size_t payload_size)
 {
     // Validate the received payload
@@ -355,6 +456,14 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
     if (apply_relocations(payload, &pe_ctx) != 0)
     {
         fprintf(stderr, "[!] Failed to apply relocations.\n");
+        cleanup_context(&pe_ctx);
+        return 1;
+    }
+
+    // Relove imports
+    if (resolve_imports(payload, &pe_ctx) != 0)
+    {
+        fprintf(stderr, "[!] Failed to resolve imports.\n");
         cleanup_context(&pe_ctx);
         return 1;
     }
