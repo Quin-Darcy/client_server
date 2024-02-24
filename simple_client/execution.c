@@ -8,7 +8,7 @@
 typedef struct _SECTION_INFO {
     unsigned char* name; // Name of the section
     LPVOID base_address; // The address at which the section was loaded in memory
-    LPVOID preferred_address; // The address relative to ImageBase at which this section was intended to be loaded
+    LPVOID preferred_address; // The address at which this section was intended to be loaded
     DWORD virtual_address; // Offset from ImageBase
     DWORD virtual_size;  // The size of the section in memory
     intptr_t delta; // Difference between the preferred load address and the actual load address
@@ -16,10 +16,10 @@ typedef struct _SECTION_INFO {
 
 typedef struct _PE_CONTEXT {
     DWORD image_base; // Preferred base address
-    DWORD address_of_entry; // Address at which the entry point is located
+    DWORD address_of_entry; // Offset relative to ImageBase where the program's entry point is located
     DWORD number_of_sections; // Number of sections
-    IMAGE_SECTION_HEADER* section_headers; // Pointer to the first section header
-    SECTION_INFO* sections_info; // Stores the actual base address of each section and its size
+    IMAGE_SECTION_HEADER* section_headers; // Pointer to an array of section headers
+    SECTION_INFO* sections_info; // Pointer to array of SECTION_INFO structs - One for each section
 } PE_CONTEXT; 
 
 
@@ -235,13 +235,12 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     DWORD reloc_offset = 0;
     for (DWORD i = 0; i < pe_ctx->number_of_sections; i++) 
     {
-        // Find the sections whose virtual address range contains the virtual address of the relocation directory
+        // Find the section in payload whose virtual address range contains the virtual address of the relocation directory
         IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[i];
         if (relocation_directory.VirtualAddress >= section->VirtualAddress &&
             relocation_directory.VirtualAddress < section->VirtualAddress + section->SizeOfRawData) 
         {
-            // Once found, take the difference between the two RVAs which represents a virtual offset and add to it the disk offset
-            // This gives the actual address in the payload (on disk) where the relocation directory can be found
+            // Once found, compute the offset to the relocation_driectory from payload's start 
             reloc_offset = section->PointerToRawData + (relocation_directory.VirtualAddress - section->VirtualAddress);
             found = 1;
             break;
@@ -273,6 +272,7 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             DWORD section_virtual_address = (DWORD)pe_ctx->sections_info[i].virtual_address;
             DWORD virtual_size = (DWORD)pe_ctx->sections_info[i].virtual_size;
 
+            // Store the section's index for later referencing 
             if ((section_virtual_address <= page_virtual_address) && (page_virtual_address <= section_virtual_address + virtual_size))
             {
                 section_index = i;
@@ -286,7 +286,7 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             return 1;
         }
 
-        // Compute the actual address of the 4KB page which this relocation block corresponds to 
+        // Compute the actual address of the 4KB page in memory which this relocation block corresponds to 
         DWORD_PTR actual_page_address = (DWORD_PTR)pe_ctx->sections_info[section_index].base_address 
             + (page_virtual_address - (DWORD)pe_ctx->sections_info[section_index].virtual_address);
         // Create pointer pointing to entires right after the IMAGE_BASE_RELOCATION header
@@ -302,13 +302,13 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             WORD type = relocation_info >> 12;
             // The remaining 12 bits define the offset within the page
             WORD offset = relocation_info & 0x0FFF;
-            // Compute the patch address
-            DWORD_PTR* patch_address = (DWORD_PTR*)(actual_page_address + offset); // This needs to match the relocation type's expected size
+            // Compute the address in memory which needs patching
+            DWORD_PTR* patch_address = (DWORD_PTR*)(actual_page_address + offset); 
 
             // Handle the case for 32-bit relocation types
             if (type == IMAGE_REL_BASED_HIGHLOW)
             {
-                // Shift the patch address by the delta corresponding to this section
+                // Shift the patch address by the delta of this section
                 *(DWORD*)patch_address += (DWORD)pe_ctx->sections_info[section_index].delta;
                 entries_processed += 1;
             }
