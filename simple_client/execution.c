@@ -386,7 +386,8 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[section_index];
 
     // To track number of imports resolved
-    DWORD imports_resolved = 0;
+    DWORD function_imports_resolved = 0;
+    DWORD libraries_loaded = 0;
 
     // Step through each import descriptor
     while (current_import_descriptor->Name != 0)
@@ -403,7 +404,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
 
         // Find the section which contains the IAT for this import descriptor
         int found = 0;
-        DWORD section_index;
+        DWORD iat_section_index;
         // FirstThunk is a pointer to the IAT
         DWORD iat_rva = current_import_descriptor->FirstThunk;
         for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
@@ -412,7 +413,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             if ((current_section->VirtualAddress <= iat_rva) && (iat_rva <= current_section->VirtualAddress + current_section->SizeOfRawData))
             {
                 found = 1;
-                section_index = i;
+                iat_section_index = i;
             }
         }
 
@@ -423,19 +424,19 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         }
 
         // Compute the actual address of the IAT in memory
-        LPVOID iat_pointer = (LPVOID)((DWORD)pe_ctx->sections_info[section_index].base_address + (iat_rva - pe_ctx->section_headers[section_index].VirtualAddress));
+        DWORD_PTR iat_base = (DWORD_PTR)pe_ctx->sections_info[iat_section_index].base_address + (iat_rva - pe_ctx->section_headers[iat_section_index].VirtualAddress);
 
         // Find the section which contains the address of the ILT
+        found = 0;
         DWORD ilt_rva = current_import_descriptor->OriginalFirstThunk;
-        DWORD ilt_offset;
+        DWORD ilt_section_index;
         for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
         {
             IMAGE_SECTION_HEADER* current_section = &pe_ctx->section_headers[i];
             if ((current_section->VirtualAddress <= ilt_rva) && (ilt_rva <= current_section->VirtualAddress + current_section->SizeOfRawData))
             {
-                ilt_offset = section->PointerToRawData + (ilt_rva - current_section->VirtualAddress);
                 found = 1;
-                section_index = i;
+                ilt_section_index = i;
             }
         }
 
@@ -445,61 +446,50 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             return 1;
         }
 
-        // Compute the address relative to payload of the ILT
-        LPVOID ilt_pointer = (LPVOID)(payload + ilt_offset);
+        // Compute the actual address of the ILT in memory
+        DWORD_PTR ilt_base = (DWORD_PTR)pe_ctx->sections_info[ilt_section_index].base_address + (ilt_rva - pe_ctx->section_headers[ilt_section_index].VirtualAddress);
 
-        // Loop through each entry in the ILT and retrieve either the name or ordinal of the corresponding function
-        // Then retrieve the address of that function in the loaded library from which it is exported from
-        // Then update the IAT with this function address
+        // Cast the IAT and ILT pointers into IMAGE_THUNK_DATA structs so we can navigate them
+        IMAGE_THUNK_DATA* ilt_entry = (IMAGE_THUNK_DATA*)ilt_base;
+        IMAGE_THUNK_DATA* iat_entry = (IMAGE_THUNK_DATA*)iat_base;
+
+        // Resolve each function address using ILT and update IAT
+        while (ilt_entry->u1.AddressOfData != 0) 
+        {
+            FARPROC func_address = NULL;
+
+            // Check if entry points to oridinal or name and resolve accordingly
+            if (IMAGE_SNAP_BY_ORDINAL(ilt_entry->u1.Ordinal)) 
+            {
+                func_address = GetProcAddress(dll_module, MAKEINTRESOURCEA(IMAGE_ORDINAL(ilt_entry->u1.Ordinal)));
+            }
+            else 
+            {
+                IMAGE_SECTION_HEADER* ilt_section = &pe_ctx->section_headers[ilt_section_index];
+                IMAGE_IMPORT_BY_NAME* import_by_name = (IMAGE_IMPORT_BY_NAME*)((DWORD_PTR)payload + ilt_section->PointerToRawData + (ilt_entry->u1.AddressOfData - ilt_section->VirtualAddress));
+                func_address = GetProcAddress(dll_module, import_by_name->Name);
+            }
+
+            if (func_address == NULL) 
+            {
+                fprintf(stderr, "[!] Failed to resolve address for function imported by %s.\n", dll_name);
+                return 1;
+            }
+
+            // Update the IAT entry with the resolved function address
+            iat_entry->u1.Function = (ULONG_PTR)func_address;
+
+            // Move to the next entries in the ILT and IAT
+            ilt_entry++;
+            iat_entry++;
+            function_imports_resolved++;
+        }
+
+        current_import_descriptor++; 
+        libraries_loaded++;
     }
 
-    // Patch IAT after getting actual address of IAT
-
-    // // Iterate throught each 
-    // while (import_descriptor->Name != 0)
-    // {
-    //     // Load the library from which the functions are imported
-    //     const char* dll_name = (const char*)(payload + section->PointerToRawData + (import_descriptor->Name - section->VirtualAddress));
-    //     printf("[i] Import Descriptor Name: %s\n", dll_name);
-    //     HMODULE dll_module = LoadLibraryA((LPCSTR)dll_name);
-    //     if (dll_module == NULL)
-    //     {
-    //         fprintf(stderr, "[!] Failed to load %s.\n", dll_name);
-    //         return 1;
-    //     }
-
-    //     // Patch the IAT by replacing each placeholder with the actual address of the imported function
-    //     IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(payload + import_descriptor->FirstThunk);
-    //     while (thunk->u1.Function != 0) 
-    //     {
-    //         if (IMAGE_SNAP_BY_ORDINAL32(thunk->u1.Ordinal)) 
-    //         {
-    //             FARPROC proc_address = GetProcAddress(dll_module, (LPCSTR)IMAGE_ORDINAL32(thunk->u1.Ordinal));
-    //             if (proc_address == NULL) 
-    //             {
-    //                 fprintf(stderr, "[!] GetProcAddress() failed for ordinal %lu.\n", (ULONG)IMAGE_ORDINAL32(thunk->u1.Ordinal));
-    //                 return 1;
-    //             }
-    //             thunk->u1.Function = (ULONG_PTR)proc_address;
-    //         } 
-    //         else 
-    //         {
-    //             IMAGE_IMPORT_BY_NAME* import_by_name = (IMAGE_IMPORT_BY_NAME*)(payload + thunk->u1.AddressOfData);
-    //             FARPROC proc_address = GetProcAddress(dll_module, import_by_name->Name);
-    //             if (proc_address == NULL) 
-    //             {
-    //                 fprintf(stderr, "[!] GetProcAddress() failed for %s.\n", import_by_name->Name);
-    //                 return 1;
-    //             }
-    //             thunk->u1.Function = (ULONG_PTR)proc_address;
-    //         }
-    //         thunk += 1;
-    //     }
-    //     import_descriptor++;
-    //     imports_resolved += 1;
-    // }
-
-    printf("[i] %d total imports resolved.\n", imports_resolved);
+    printf("[i] %d total libraries loaded and %d function imports resolved.\n", libraries_loaded, function_imports_resolved);
 
     return 0;
 }
