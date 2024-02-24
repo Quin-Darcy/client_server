@@ -6,6 +6,7 @@
 #include "execution.h"
 
 typedef struct _SECTION_INFO {
+    unsigned char* name; // Name of the section
     LPVOID base_address; // The address at which the section was loaded in memory
     LPVOID preferred_address; // The address relative to ImageBase at which this section was intended to be loaded
     DWORD virtual_address; // Offset from ImageBase
@@ -187,6 +188,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         }
 
         // Update the corresponding sections_info member
+        current_sections_info->name = current_section->Name;
         current_sections_info->base_address = base_addr;
         current_sections_info->preferred_address = preferred_address;
         current_sections_info->virtual_address = current_section->VirtualAddress;
@@ -343,13 +345,14 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     const IMAGE_OPTIONAL_HEADER* optional_header = &nt_headers->OptionalHeader;
     const IMAGE_DATA_DIRECTORY* import_directory = &optional_header->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
 
-    // Check if there are even any imports to resolve
+    // Check if there are any imports to resolve
     if (import_directory->Size == 0) 
     {
         printf("[i] No imports to resolve.\n");
         return 0;
     }
 
+    // Searching within the payload (the PE as it was on disk), find the section which contains the import directory
     int found = 0;
     DWORD import_offset = 0;
     DWORD section_index;
@@ -360,10 +363,11 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         if (import_directory->VirtualAddress >= section->VirtualAddress &&
             import_directory->VirtualAddress < section->VirtualAddress + section->SizeOfRawData) 
         {
-            // Once found, take the difference between the two RVAs which represents a virtual offset and add to it the disk offset
-            // This gives the actual address in the payload (on disk) where the import directory can be found
+            // Once found, compute the offset from the payload start to the import directory
             import_offset = section->PointerToRawData + (import_directory->VirtualAddress - section->VirtualAddress);
             found = 1;
+
+            // To reference this section later on
             section_index = i;
             break;
         }
@@ -374,14 +378,30 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         return 1;
     }
 
-    // Each IMAGE_IMPORT_DESCRIPTOR corresponds to a DLL from which functions are imported
+    // Each IMAGE_IMPORT_DESCRIPTOR corresponds to a DLL from which functions are imported - Here we set a pointer to the first one
     const IMAGE_IMPORT_DESCRIPTOR* import_descriptor = (const IMAGE_IMPORT_DESCRIPTOR*)(payload + import_offset); 
+
+    // The section containing the import directory found earlier
+    IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[section_index];
 
     // To track number of imports resolved
     DWORD imports_resolved = 0;
 
-    // The section containing the import directory
-    IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[section_index];
+    // Step through each import descriptor
+    while (import_descriptor->Name != 0)
+    {
+        // Retrieve the library's name - Note we are pulling the name from the payload and not from the loaded section in memory
+        const char* dll_name = (const char*)(payload + section->PointerToRawData + (import_descriptor->Name - section->VirtualAddress));
+        // Load the library into the current process
+        HMODULE dll_module = LoadLibraryA(dll_name);
+        if (dll_module == NULL)
+        {
+            fprintf(stderr, "[!] LoadLibraryA() failed to load %s.\n", dll_name);
+            return 1;
+        }
+
+
+    }
 
     // Patch IAT after getting actual address of IAT
 
