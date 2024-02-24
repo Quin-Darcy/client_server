@@ -5,6 +5,8 @@
 #include <winnt.h>
 #include "execution.h"
 
+// TODO: SIMPLIFY SECTION_INFO - MANY MEMBERS ARE REDUNDAT WITH WHAT'S ALREADY IN SECTION_HEADERS FIELD OF PE_CONTEXT - base_address, delta
+
 typedef struct _SECTION_INFO {
     unsigned char* name; // Name of the section
     LPVOID base_address; // The address at which the section was loaded in memory
@@ -352,23 +354,22 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         return 0;
     }
 
-    // Searching within the payload (the PE as it was on disk), find the section which contains the import directory
+    // Searching within the payload (the PE as it was on disk), and find the section which contains the VirtualAddress of the first import descriptor
     int found = 0;
     DWORD import_offset = 0;
     DWORD section_index;
     for (DWORD i = 0; i < pe_ctx->number_of_sections; i++) 
     {
-        // Find the sections whose virtual address range contains the virtual address of the import directory
+        // Find the section whose virtual address range contains the virtual address of the import directory
         IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[i];
         if (import_directory->VirtualAddress >= section->VirtualAddress &&
             import_directory->VirtualAddress < section->VirtualAddress + section->SizeOfRawData) 
         {
             // Once found, compute the offset from the payload start to the import directory
             import_offset = section->PointerToRawData + (import_directory->VirtualAddress - section->VirtualAddress);
-            found = 1;
-
-            // To reference this section later on
+            // Save the index of this section for later reference
             section_index = i;
+            found = 1;
             break;
         }
     }
@@ -379,19 +380,19 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     }
 
     // Each IMAGE_IMPORT_DESCRIPTOR corresponds to a DLL from which functions are imported - Here we set a pointer to the first one
-    const IMAGE_IMPORT_DESCRIPTOR* import_descriptor = (const IMAGE_IMPORT_DESCRIPTOR*)(payload + import_offset); 
+    const IMAGE_IMPORT_DESCRIPTOR* current_import_descriptor = (const IMAGE_IMPORT_DESCRIPTOR*)(payload + import_offset); 
 
-    // The section containing the import directory found earlier
+    // The section containing the first import descriptor found earlier
     IMAGE_SECTION_HEADER* section = &pe_ctx->section_headers[section_index];
 
     // To track number of imports resolved
     DWORD imports_resolved = 0;
 
     // Step through each import descriptor
-    while (import_descriptor->Name != 0)
+    while (current_import_descriptor->Name != 0)
     {
-        // Retrieve the library's name - Note we are pulling the name from the payload and not from the loaded section in memory
-        const char* dll_name = (const char*)(payload + section->PointerToRawData + (import_descriptor->Name - section->VirtualAddress));
+        // Retrieve the library's name by first jumping to the address in payload of the section containing import descriptors and moving up an offset from there 
+        const char* dll_name = (const char*)(payload + section->PointerToRawData + (current_import_descriptor->Name - section->VirtualAddress));
         // Load the library into the current process
         HMODULE dll_module = LoadLibraryA(dll_name);
         if (dll_module == NULL)
@@ -400,7 +401,56 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             return 1;
         }
 
+        // Find the section which contains the IAT for this import descriptor
+        int found = 0;
+        DWORD section_index;
+        // FirstThunk is a pointer to the IAT
+        DWORD iat_rva = current_import_descriptor->FirstThunk;
+        for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
+        {
+            IMAGE_SECTION_HEADER* current_section = &pe_ctx->section_headers[i];
+            if ((current_section->VirtualAddress <= iat_rva) && (iat_rva <= current_section->VirtualAddress + current_section->SizeOfRawData))
+            {
+                found = 1;
+                section_index = i;
+            }
+        }
 
+        if (found == 0)
+        {
+            fprintf(stderr, "[!] Unable to find section containing IAT for %s.\n", dll_name);
+            return 1;
+        }
+
+        // Compute the actual address of the IAT in memory
+        LPVOID iat_pointer = (LPVOID)((DWORD)pe_ctx->sections_info[section_index].base_address + (iat_rva - pe_ctx->section_headers[section_index].VirtualAddress));
+
+        // Find the section which contains the address of the ILT
+        DWORD ilt_rva = current_import_descriptor->OriginalFirstThunk;
+        DWORD ilt_offset;
+        for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
+        {
+            IMAGE_SECTION_HEADER* current_section = &pe_ctx->section_headers[i];
+            if ((current_section->VirtualAddress <= ilt_rva) && (ilt_rva <= current_section->VirtualAddress + current_section->SizeOfRawData))
+            {
+                ilt_offset = section->PointerToRawData + (ilt_rva - current_section->VirtualAddress);
+                found = 1;
+                section_index = i;
+            }
+        }
+
+        if (found == 0)
+        {
+            fprintf(stderr, "[!] Unable to find section containing ILT for %s.\n", dll_name);
+            return 1;
+        }
+
+        // Compute the address relative to payload of the ILT
+        LPVOID ilt_pointer = (LPVOID)(payload + ilt_offset);
+
+        // Loop through each entry in the ILT and retrieve either the name or ordinal of the corresponding function
+        // Then retrieve the address of that function in the loaded library from which it is exported from
+        // Then update the IAT with this function address
     }
 
     // Patch IAT after getting actual address of IAT
