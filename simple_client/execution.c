@@ -5,14 +5,8 @@
 #include <winnt.h>
 #include "execution.h"
 
-// TODO: SIMPLIFY SECTION_INFO - MANY MEMBERS ARE REDUNDAT WITH WHAT'S ALREADY IN SECTION_HEADERS FIELD OF PE_CONTEXT - base_address, delta
-
 typedef struct _SECTION_INFO {
-    unsigned char* name; // Name of the section
     LPVOID base_address; // The address at which the section was loaded in memory
-    LPVOID preferred_address; // The address at which this section was intended to be loaded
-    DWORD virtual_address; // Offset from ImageBase
-    DWORD virtual_size;  // The size of the section in memory
     intptr_t delta; // Difference between the preferred load address and the actual load address
 } SECTION_INFO;
 
@@ -21,7 +15,7 @@ typedef struct _PE_CONTEXT {
     DWORD address_of_entry; // Offset relative to ImageBase where the program's entry point is located
     DWORD number_of_sections; // Number of sections
     IMAGE_SECTION_HEADER* section_headers; // Pointer to an array of section headers
-    SECTION_INFO* sections_info; // Pointer to array of SECTION_INFO structs - One for each section
+    SECTION_INFO* mapped_sections_info; // Pointer to array of SECTION_INFO structs - One for each section
 } PE_CONTEXT; 
 
 
@@ -29,7 +23,7 @@ void cleanup_context(PE_CONTEXT* pe_ctx)
 {
     printf("[+] Cleaning up PE context ...\n");
 
-    // Free the memory which was allocated to the sections_headers and sections_info members
+    // Free the memory which was allocated to the sections_headers and mapped_sections_info members
     if (pe_ctx->section_headers != NULL)
     {
         free(pe_ctx->section_headers);
@@ -38,7 +32,7 @@ void cleanup_context(PE_CONTEXT* pe_ctx)
     // Loop through and free all the allocated memory for each section
     for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
     {
-        SECTION_INFO* current_section_info = &pe_ctx->sections_info[i];
+        SECTION_INFO* current_section_info = &pe_ctx->mapped_sections_info[i];
 
         if (!VirtualFree(current_section_info->base_address, 0, MEM_RELEASE))
         {
@@ -46,10 +40,10 @@ void cleanup_context(PE_CONTEXT* pe_ctx)
         }
     }
 
-    // Free the memory allocated to sections_info
-    if (pe_ctx->sections_info != NULL)
+    // Free the memory allocated to mapped_sections_info
+    if (pe_ctx->mapped_sections_info != NULL)
     {
-        free(pe_ctx->sections_info);
+        free(pe_ctx->mapped_sections_info);
     }
 }
 
@@ -152,11 +146,11 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     // Copy section_headers_size many bytes starting from the beginning of the first section header at nt_headers + 1
     memcpy(pe_ctx->section_headers, (void*)(nt_headers + 1), section_headers_size);
 
-    // Allocate memory for the sections_info member
+    // Allocate memory for the mapped_sections_info member
     size_t sections_size = sizeof(SECTION_INFO) * pe_ctx->number_of_sections;
-    pe_ctx->sections_info = (SECTION_INFO*)calloc(sections_size, 1);
+    pe_ctx->mapped_sections_info = (SECTION_INFO*)calloc(sections_size, 1);
 
-    if (pe_ctx->sections_info == NULL)
+    if (pe_ctx->mapped_sections_info == NULL)
     {
         fprintf(stderr, "[!] Failed to allocate memory for sections info.\n");
         return 1;
@@ -167,7 +161,7 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     {
         // Capture the current header and section info
         IMAGE_SECTION_HEADER* current_section = &pe_ctx->section_headers[i];
-        SECTION_INFO* current_sections_info = &pe_ctx->sections_info[i];
+        SECTION_INFO* current_mapped_sections_info = &pe_ctx->mapped_sections_info[i];
 
         // Align VirtualSize with the nearest higher multiple of section_alignment
         size_t aligned_size = (current_section->Misc.VirtualSize + section_alignment - 1) & ~(section_alignment - 1);
@@ -189,13 +183,9 @@ int load_sections(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             }
         }
 
-        // Update the corresponding sections_info member
-        current_sections_info->name = current_section->Name;
-        current_sections_info->base_address = base_addr;
-        current_sections_info->preferred_address = preferred_address;
-        current_sections_info->virtual_address = current_section->VirtualAddress;
-        current_sections_info->virtual_size = current_section->Misc.VirtualSize;
-        current_sections_info->delta = (intptr_t)base_addr - (intptr_t)preferred_address;
+        // Update the corresponding mapped_sections_info member
+        current_mapped_sections_info->base_address = base_addr;
+        current_mapped_sections_info->delta = (intptr_t)base_addr - (intptr_t)preferred_address;
 
         // Copy the contents of the section into the allocated region provided they are non-zero
         if (current_section->SizeOfRawData > 0)
@@ -271,8 +261,8 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         DWORD section_index = (DWORD)-1;
         for (DWORD i = 0; i < pe_ctx->number_of_sections; i++)
         {
-            DWORD section_virtual_address = (DWORD)pe_ctx->sections_info[i].virtual_address;
-            DWORD virtual_size = (DWORD)pe_ctx->sections_info[i].virtual_size;
+            DWORD section_virtual_address = (DWORD)pe_ctx->section_headers[i].VirtualAddress;
+            DWORD virtual_size = (DWORD)pe_ctx->section_headers[i].Misc.VirtualSize;
 
             // Store the section's index for later referencing 
             if ((section_virtual_address <= page_virtual_address) && (page_virtual_address <= section_virtual_address + virtual_size))
@@ -289,8 +279,8 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         }
 
         // Compute the actual address of the 4KB page in memory which this relocation block corresponds to 
-        DWORD_PTR actual_page_address = (DWORD_PTR)pe_ctx->sections_info[section_index].base_address 
-            + (page_virtual_address - (DWORD)pe_ctx->sections_info[section_index].virtual_address);
+        DWORD_PTR actual_page_address = (DWORD_PTR)pe_ctx->mapped_sections_info[section_index].base_address 
+            + (page_virtual_address - (DWORD)pe_ctx->section_headers[section_index].VirtualAddress);
         // Create pointer pointing to entires right after the IMAGE_BASE_RELOCATION header
         WORD* relocation_entries = (WORD*)((DWORD_PTR)current_block + sizeof(IMAGE_BASE_RELOCATION));
         // Calculate teh number of relocation entries in this block
@@ -311,7 +301,7 @@ int apply_relocations(const unsigned char* payload, PE_CONTEXT* pe_ctx)
             if (type == IMAGE_REL_BASED_HIGHLOW)
             {
                 // Shift the patch address by the delta of this section
-                *(DWORD*)patch_address += (DWORD)pe_ctx->sections_info[section_index].delta;
+                *(DWORD*)patch_address += (DWORD)pe_ctx->mapped_sections_info[section_index].delta;
                 entries_processed += 1;
             }
             else if (type == IMAGE_REL_BASED_ABSOLUTE)
@@ -424,7 +414,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         }
 
         // Compute the actual address of the IAT in memory
-        DWORD_PTR iat_base = (DWORD_PTR)pe_ctx->sections_info[iat_section_index].base_address + (iat_rva - pe_ctx->section_headers[iat_section_index].VirtualAddress);
+        DWORD_PTR iat_base = (DWORD_PTR)pe_ctx->mapped_sections_info[iat_section_index].base_address + (iat_rva - pe_ctx->section_headers[iat_section_index].VirtualAddress);
 
         // Find the section which contains the address of the ILT
         found = 0;
@@ -447,7 +437,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         }
 
         // Compute the actual address of the ILT in memory
-        DWORD_PTR ilt_base = (DWORD_PTR)pe_ctx->sections_info[ilt_section_index].base_address + (ilt_rva - pe_ctx->section_headers[ilt_section_index].VirtualAddress);
+        DWORD_PTR ilt_base = (DWORD_PTR)pe_ctx->mapped_sections_info[ilt_section_index].base_address + (ilt_rva - pe_ctx->section_headers[ilt_section_index].VirtualAddress);
 
         // Cast the IAT and ILT pointers into IMAGE_THUNK_DATA structs so we can navigate them
         IMAGE_THUNK_DATA* ilt_entry = (IMAGE_THUNK_DATA*)ilt_base;
