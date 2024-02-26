@@ -486,7 +486,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     return 0;
 }
 
-int transfer_control(PE_CONTEXT* pe_ctx)
+int transfer_control(PE_CONTEXT* pe_ctx, const unsigned char* payload)
 {
     printf("[+] Transferring control to loaded program's entry point ...\n");
 
@@ -512,6 +512,12 @@ int transfer_control(PE_CONTEXT* pe_ctx)
 
     // Compute the in-memory address of the entry point
     LPVOID entry_point_address = (LPVOID)((DWORD)pe_ctx->mapped_sections_info[section_index].base_address + (entry_point_rva - pe_ctx->section_headers[section_index].VirtualAddress));
+    
+    LPVOID entry_point_disk = (LPVOID)(payload + pe_ctx->section_headers[section_index].PointerToRawData + (entry_point_rva - pe_ctx->section_headers[section_index].VirtualAddress));
+
+    printf("[i] Entry Point in Memory Address: %p\n", (void*)entry_point_address);
+    printf("[i] Entry Point in Disk Address: %p\n", (void*)entry_point_disk);
+    getchar();
 
     // Assuming the entry point does not expect any arguments and returns an int
     int (*entry_point)() = (int (*)())entry_point_address;
@@ -557,7 +563,7 @@ int execute_payload(const unsigned char* payload, const size_t payload_size)
     }
 
     // Transfer control to entry point
-    if (transfer_control(&pe_ctx) != 0)
+    if (transfer_control(&pe_ctx, payload) != 0)
     {
         fprintf(stderr, "[!] Failed to transfer control.\n");
         cleanup_context(&pe_ctx);
