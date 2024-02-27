@@ -384,6 +384,7 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
     {
         // Retrieve the library's name by first jumping to the address in payload of the section containing import descriptors and moving up an offset from there 
         const char* dll_name = (const char*)(payload + section->PointerToRawData + (current_import_descriptor->Name - section->VirtualAddress));
+
         // Load the library into the current process
         HMODULE dll_module = LoadLibraryA(dll_name);
         if (dll_module == NULL)
@@ -417,6 +418,8 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         // Compute the actual address of the IAT in memory
         DWORD_PTR iat_base = (DWORD_PTR)pe_ctx->mapped_sections_info[iat_section_index].base_address + (iat_rva - pe_ctx->section_headers[iat_section_index].VirtualAddress);
 
+        printf("[i] IAT Base Address: %p\n", (void*)iat_base);
+
         // Find the section which contains the address of the ILT
         found = 0;
         DWORD ilt_rva = current_import_descriptor->OriginalFirstThunk;
@@ -442,8 +445,8 @@ int resolve_imports(const unsigned char* payload, PE_CONTEXT* pe_ctx)
         DWORD_PTR ilt_base = (DWORD_PTR)pe_ctx->mapped_sections_info[ilt_section_index].base_address + (ilt_rva - pe_ctx->section_headers[ilt_section_index].VirtualAddress);
 
         // Cast the IAT and ILT pointers into IMAGE_THUNK_DATA structs so we can navigate them
-        IMAGE_THUNK_DATA* ilt_entry = (IMAGE_THUNK_DATA*)ilt_base;
-        IMAGE_THUNK_DATA* iat_entry = (IMAGE_THUNK_DATA*)iat_base;
+        IMAGE_THUNK_DATA32* ilt_entry = (IMAGE_THUNK_DATA32*)ilt_base;
+        IMAGE_THUNK_DATA32* iat_entry = (IMAGE_THUNK_DATA32*)iat_base;
 
         // Resolve each function address using ILT and update IAT
         while (ilt_entry->u1.AddressOfData != 0) 
@@ -516,7 +519,6 @@ int transfer_control(PE_CONTEXT* pe_ctx, const unsigned char* payload)
     LPVOID entry_point_disk = (LPVOID)(payload + pe_ctx->section_headers[section_index].PointerToRawData + (entry_point_rva - pe_ctx->section_headers[section_index].VirtualAddress));
 
     printf("[i] Entry Point in Memory Address: %p\n", (void*)entry_point_address);
-    printf("[i] Entry Point in Disk Address: %p\n", (void*)entry_point_disk);
     getchar();
 
     // Assuming the entry point does not expect any arguments and returns an int
